@@ -1,0 +1,10 @@
+uploads/
+models/
+.venv/
+__pycache__/
+*.pyc
+.paddlex/
+output/
+*.pdf
+server.log
+server.err.log

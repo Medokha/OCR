@@ -1,0 +1,57 @@
+<!DOCTYPE html>
+<html lang="ar" dir="rtl">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>قراءة — OCR عربي</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Cairo:wght@400;600;700;800&family=IBM+Plex+Sans+Arabic:wght@400;500;600&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="/static/styles.css" />
+</head>
+<body>
+  <div class="atmosphere" aria-hidden="true"></div>
+
+  <main class="shell">
+    <header class="hero">
+      <p class="brand">قراءة</p>
+      <h1>استخراج النص العربي من ملفات PDF</h1>
+      <p class="lede">ارفع المستند، وستظهر كل صفحة فور قراءتها باستخدام PaddleOCR v3 (نموذج عربي مفتوح المصدر).</p>
+      <div class="cta-row">
+        <label class="btn-primary" for="pdf-input">اختر ملف PDF</label>
+        <input id="pdf-input" type="file" accept="application/pdf,.pdf" hidden />
+        <button id="run-btn" class="btn-secondary" type="button" disabled>ابدأ القراءة</button>
+      </div>
+      <p id="file-label" class="file-label">الحد الأقصى {{ max_upload_mb }} ميجابايت · PDF فقط</p>
+    </header>
+
+    <section id="status" class="status" hidden>
+      <div class="spinner" aria-hidden="true"></div>
+      <p id="status-text">جاري قراءة الصفحات…</p>
+    </section>
+
+    <section id="error" class="error" hidden></section>
+
+    <section id="results" class="results" hidden>
+      <div class="results-head">
+        <div>
+          <h2>النتيجة</h2>
+          <p id="meta" class="meta"></p>
+        </div>
+        <div class="result-actions">
+          <button id="copy-btn" class="btn-ghost" type="button">نسخ النص</button>
+          <button id="download-btn" class="btn-ghost" type="button">تحميل TXT</button>
+        </div>
+      </div>
+      <pre id="output" class="output" dir="rtl"></pre>
+      <div id="pages" class="pages"></div>
+    </section>
+  </main>
+
+  <footer class="footer">
+    <span>PaddleOCR · lang=ar · PP-OCRv5 Arabic</span>
+  </footer>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>

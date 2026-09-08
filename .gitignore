@@ -1,0 +1,24 @@
+# Python
+paddle_ocr/.venv/
+paddle_ocr/__pycache__/
+paddle_ocr/**/__pycache__/
+paddle_ocr/uploads/
+paddle_ocr/models/
+paddle_ocr/*.log
+paddle_ocr/server.log
+paddle_ocr/server.err.log
+*.pyc
+.paddlex/
+
+# .NET / Visual Studio
+**/bin/
+**/obj/
+.vs/
+*.user
+*.suo
+
+# OS / editor
+.DS_Store
+Thumbs.db
+*.swp
+.idea/
