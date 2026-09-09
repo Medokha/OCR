@@ -103,6 +103,10 @@ body {
   font-size: 1rem;
   border: 0;
   cursor: pointer;
+  text-decoration: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
   transition: transform 160ms ease, background 160ms ease, opacity 160ms ease;
 }
 
@@ -154,6 +158,79 @@ body {
   margin: 1rem 0 0;
   font-size: 0.92rem;
   color: rgba(11, 31, 28, 0.55);
+}
+
+.field-builder {
+  margin: 0 0 1.5rem;
+  padding: 1rem 1.1rem;
+  border-radius: var(--radius);
+  background: rgba(255, 255, 255, 0.55);
+  border: 1px solid var(--line);
+  backdrop-filter: blur(8px);
+  animation: rise 700ms ease both;
+}
+
+.field-builder-label {
+  display: block;
+  margin-bottom: 0.55rem;
+  font-family: var(--font-display);
+  font-weight: 700;
+  color: var(--pine);
+}
+
+.field-builder-row {
+  display: flex;
+  gap: 0.6rem;
+  flex-wrap: wrap;
+}
+
+.field-builder-row input {
+  flex: 1;
+  min-width: 220px;
+  padding: 0.75rem 0.95rem;
+  border-radius: 12px;
+  border: 1px solid var(--line);
+  background: #fff;
+  font-family: var(--font-body);
+  font-size: 1rem;
+  color: var(--ink);
+}
+
+.field-builder-row input:focus {
+  outline: 2px solid rgba(31, 138, 114, 0.35);
+  border-color: var(--teal);
+}
+
+.field-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.45rem;
+  margin-top: 0.75rem;
+  min-height: 0.5rem;
+}
+
+.chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  padding: 0.35rem 0.65rem;
+  border-radius: 999px;
+  border: 1px solid rgba(31, 138, 114, 0.25);
+  background: rgba(216, 243, 234, 0.65);
+  color: var(--ink);
+  font-family: var(--font-body);
+  font-size: 0.92rem;
+  cursor: pointer;
+}
+
+.chip:hover {
+  background: rgba(31, 138, 114, 0.16);
+}
+
+.chip-x {
+  font-size: 1.05rem;
+  line-height: 1;
+  color: var(--pine);
 }
 
 .status,
@@ -229,6 +306,110 @@ body {
 .result-actions {
   display: flex;
   gap: 0.5rem;
+  flex-wrap: wrap;
+}
+
+.fields-panel {
+  margin-bottom: 1.2rem;
+  padding: 1rem;
+  border-radius: 14px;
+  background: rgba(216, 243, 234, 0.28);
+  border: 1px solid rgba(31, 138, 114, 0.18);
+}
+
+.fields-head {
+  display: flex;
+  justify-content: space-between;
+  gap: 1rem;
+  align-items: baseline;
+  flex-wrap: wrap;
+  margin-bottom: 0.85rem;
+}
+
+.fields-head h3 {
+  margin: 0;
+  font-family: var(--font-display);
+  font-size: 1.1rem;
+  color: var(--pine);
+}
+
+.fields-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+  gap: 0.75rem;
+}
+
+.field-card {
+  padding: 0.85rem 0.95rem;
+  border-radius: 12px;
+  background: #fff;
+  border: 1px solid var(--line);
+  animation: pageIn 360ms ease both;
+}
+
+.field-card.is-valid {
+  border-color: rgba(31, 138, 114, 0.45);
+}
+
+.field-card.is-missing {
+  border-color: rgba(155, 44, 44, 0.28);
+  background: #fff8f8;
+}
+
+.field-card.is-invalid {
+  border-color: rgba(180, 120, 20, 0.45);
+  background: #fffaf0;
+}
+
+.field-top {
+  display: flex;
+  justify-content: space-between;
+  gap: 0.5rem;
+  align-items: start;
+  margin-bottom: 0.35rem;
+}
+
+.field-label {
+  margin: 0;
+  font-family: var(--font-display);
+  font-weight: 700;
+  font-size: 0.95rem;
+}
+
+.field-badge {
+  font-size: 0.78rem;
+  white-space: nowrap;
+  color: rgba(11, 31, 28, 0.65);
+}
+
+.field-value {
+  margin: 0;
+  font-size: 1.02rem;
+  line-height: 1.6;
+  word-break: break-word;
+  min-height: 1.5em;
+}
+
+.field-value.empty {
+  color: rgba(11, 31, 28, 0.4);
+}
+
+.field-note {
+  margin: 0.4rem 0 0;
+  font-size: 0.82rem;
+  color: rgba(11, 31, 28, 0.55);
+}
+
+.raw-block {
+  margin-top: 0.5rem;
+}
+
+.raw-block summary {
+  cursor: pointer;
+  font-family: var(--font-display);
+  font-weight: 700;
+  color: var(--pine);
+  margin-bottom: 0.6rem;
 }
 
 .output {
@@ -334,4 +515,142 @@ body {
     flex: 1;
     text-align: center;
   }
+}
+
+/* Mapping screen */
+.map-layout {
+  display: grid;
+  grid-template-columns: minmax(220px, 280px) 1fr;
+  gap: 1rem;
+}
+
+@media (max-width: 900px) {
+  .map-layout {
+    grid-template-columns: 1fr;
+  }
+}
+
+.ocr-side {
+  padding: 0.9rem;
+  border-radius: 14px;
+  background: rgba(216, 243, 234, 0.28);
+  border: 1px solid rgba(31, 138, 114, 0.18);
+  max-height: 70vh;
+  overflow: auto;
+}
+
+.ocr-side h3 {
+  margin: 0 0 0.4rem;
+  font-family: var(--font-display);
+  color: var(--pine);
+}
+
+.ocr-side-list {
+  display: grid;
+  gap: 0.35rem;
+  margin-top: 0.7rem;
+}
+
+.ocr-item {
+  display: flex;
+  gap: 0.5rem;
+  align-items: flex-start;
+  width: 100%;
+  text-align: right;
+  padding: 0.45rem 0.55rem;
+  border-radius: 10px;
+  border: 1px solid var(--line);
+  background: #fff;
+  cursor: pointer;
+  font-family: var(--font-body);
+  font-size: 0.88rem;
+  color: var(--ink);
+}
+
+.ocr-item:hover,
+.ocr-item.copied {
+  border-color: rgba(31, 138, 114, 0.45);
+  background: rgba(216, 243, 234, 0.45);
+}
+
+.ocr-idx {
+  flex: 0 0 auto;
+  font-weight: 700;
+  color: var(--teal);
+}
+
+.ocr-txt {
+  flex: 1;
+  word-break: break-word;
+}
+
+.map-rows {
+  display: grid;
+  gap: 0.9rem;
+  margin-bottom: 1rem;
+}
+
+.map-row {
+  padding: 1rem;
+  border-radius: 14px;
+  background: #fff;
+  border: 1px solid var(--line);
+}
+
+.map-row-top {
+  display: flex;
+  justify-content: space-between;
+  gap: 0.75rem;
+  align-items: end;
+  flex-wrap: wrap;
+  margin-bottom: 0.85rem;
+}
+
+.map-label {
+  display: block;
+  margin-bottom: 0.35rem;
+  font-family: var(--font-display);
+  font-weight: 700;
+  font-size: 0.92rem;
+  color: var(--pine);
+}
+
+.map-select {
+  min-width: 260px;
+  max-width: 100%;
+  padding: 0.55rem 0.7rem;
+  border-radius: 10px;
+  border: 1px solid var(--line);
+  font-family: var(--font-body);
+  font-size: 0.95rem;
+  background: #fff;
+}
+
+.val-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+  gap: 0.35rem;
+  max-height: 220px;
+  overflow: auto;
+  padding: 0.55rem;
+  border-radius: 10px;
+  border: 1px solid var(--line);
+  background: #fbfaf6;
+}
+
+.val-check {
+  display: flex;
+  gap: 0.4rem;
+  align-items: flex-start;
+  font-size: 0.86rem;
+  cursor: pointer;
+}
+
+.val-check input {
+  margin-top: 0.2rem;
+}
+
+a.btn-primary,
+a.btn-ghost {
+  box-sizing: border-box;
 }

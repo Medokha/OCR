@@ -16,13 +16,25 @@
     <header class="hero">
       <p class="brand">قراءة</p>
       <h1>استخراج النص العربي من ملفات PDF</h1>
-      <p class="lede">ارفع المستند، وستظهر كل صفحة فور قراءتها باستخدام PaddleOCR v3 (نموذج عربي مفتوح المصدر).</p>
+      <p class="lede">اكتب أسماء الحقول كما تظهر في الملف (عربي أو إنجليزي)، ارفع الـ PDF، وسيُبحث عن كل حقل ويُعرض قيمته إن وُجدت.</p>
+
+      <div class="field-builder">
+        <label class="field-builder-label" for="field-input">أسماء الحقول المطلوبة</label>
+        <div class="field-builder-row">
+          <input id="field-input" type="text" placeholder="مثال: اسم المنشأة أو Tax ID ثم Enter" autocomplete="off" />
+          <button id="add-field-btn" class="btn-ghost" type="button">إضافة</button>
+        </div>
+        <div id="field-chips" class="field-chips"></div>
+        <p class="file-label">Zoning: قيمة كل حقل من <strong>يمينه</strong> على نفس الصف (مش تسميات أخرى زي Branch Code).</p>
+      </div>
+
       <div class="cta-row">
         <label class="btn-primary" for="pdf-input">اختر ملف PDF</label>
         <input id="pdf-input" type="file" accept="application/pdf,.pdf" hidden />
         <button id="run-btn" class="btn-secondary" type="button" disabled>ابدأ القراءة</button>
+        <a class="btn-ghost" href="/map" id="open-map-link">شاشة الـ Mapping</a>
       </div>
-      <p id="file-label" class="file-label">الحد الأقصى {{ max_upload_mb }} ميجابايت · PDF فقط</p>
+      <p id="file-label" class="file-label">الحد الأقصى {{ max_upload_mb }} ميجابايت · PDF فقط · بعد القراءة افتح Mapping لربط name_index بالقيم</p>
     </header>
 
     <section id="status" class="status" hidden>
@@ -39,11 +51,44 @@
           <p id="meta" class="meta"></p>
         </div>
         <div class="result-actions">
+          <a class="btn-ghost" href="/map">فتح Mapping</a>
           <button id="copy-btn" class="btn-ghost" type="button">نسخ النص</button>
+          <button id="copy-fields-btn" class="btn-ghost" type="button">نسخ الحقول</button>
+          <button id="copy-list-btn" class="btn-ghost" type="button">نسخ List JSON</button>
           <button id="download-btn" class="btn-ghost" type="button">تحميل TXT</button>
         </div>
       </div>
-      <pre id="output" class="output" dir="rtl"></pre>
+
+      <div class="fields-panel">
+        <div class="fields-head">
+          <h3>نتائج حسب الـ Mapping المحفوظ</h3>
+          <p id="mapped-meta" class="meta">بعد حفظ الـ Mapping هتظهر القيم هنا</p>
+        </div>
+        <div id="mapped-fields" class="fields-grid"></div>
+      </div>
+
+      <div class="fields-panel">
+        <div class="fields-head">
+          <h3>قيم الحقول + أماكنها في الـ List</h3>
+          <p id="fields-meta" class="meta">أضف حقولاً أولاً ثم ابدأ القراءة</p>
+        </div>
+        <div id="fields" class="fields-grid"></div>
+      </div>
+
+      <details class="raw-block" open>
+        <summary>OCR List (index → text)</summary>
+        <pre id="ocr-list" class="output" dir="rtl"></pre>
+      </details>
+
+      <details class="raw-block">
+        <summary>Pairs JSON (name_index / value_index)</summary>
+        <pre id="pairs-json" class="output" dir="ltr" style="text-align:left"></pre>
+      </details>
+
+      <details class="raw-block">
+        <summary>النص الكامل</summary>
+        <pre id="output" class="output" dir="rtl"></pre>
+      </details>
       <div id="pages" class="pages"></div>
     </section>
   </main>

@@ -1,0 +1,64 @@
+<!DOCTYPE html>
+<html lang="ar" dir="rtl">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Mapping — قراءة</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Cairo:wght@400;600;700;800&family=IBM+Plex+Sans+Arabic:wght@400;500;600&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="/static/styles.css" />
+</head>
+<body>
+  <div class="atmosphere" aria-hidden="true"></div>
+
+  <main class="shell">
+    <header class="hero">
+      <p class="brand">قراءة</p>
+      <h1>شاشة الـ Mapping</h1>
+      <p class="lede">اعمل قالب ثابت: اختر <strong>اسم الحقل</strong> والقيم التابعة له مرة واحدة. هنحفظ الاسم + إزاحة القيم، ويتطبّق تلقائياً على <strong>أي OCR</strong> لاحق حتى لو تغيّرت أرقام الـ index.</p>
+      <div class="cta-row">
+        <a class="btn-primary" href="/">العودة للقراءة</a>
+        <button id="add-map-btn" class="btn-secondary" type="button">إضافة صف Mapping</button>
+        <button id="seed-auto-btn" class="btn-ghost" type="button">تعبئة من الاستخراج التلقائي</button>
+        <button id="save-map-btn" class="btn-secondary" type="button">حفظ الـ Mapping</button>
+        <button id="copy-map-btn" class="btn-ghost" type="button">نسخ JSON</button>
+        <button id="clear-map-btn" class="btn-ghost" type="button">مسح</button>
+      </div>
+      <p id="map-status" class="file-label">انتظر تحميل قائمة OCR…</p>
+    </header>
+
+    <section id="empty" class="error" hidden>
+      لا توجد قائمة OCR محفوظة. اذهب لصفحة القراءة، نفّذ OCR على ملف، ثم افتح شاشة الـ Mapping.
+    </section>
+
+    <section id="mapper" class="results" hidden>
+      <div class="map-layout">
+        <aside class="ocr-side">
+          <h3>OCR List</h3>
+          <p class="meta">اضغط على عنصر لنسخ رقمه، أو استخدم القوائم في صفوف الـ mapping.</p>
+          <div id="ocr-side-list" class="ocr-side-list"></div>
+        </aside>
+
+        <div class="map-main">
+          <div class="fields-head">
+            <h3>ربط الاسم ← القيم</h3>
+            <p id="map-meta" class="meta"></p>
+          </div>
+          <div id="map-rows" class="map-rows"></div>
+          <details class="raw-block" open>
+            <summary>Mapping JSON</summary>
+            <pre id="map-json" class="output" dir="ltr" style="text-align:left"></pre>
+          </details>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <footer class="footer">
+    <span>name_index → value_indices[] (0..n)</span>
+  </footer>
+
+  <script src="/static/map.js"></script>
+</body>
+</html>

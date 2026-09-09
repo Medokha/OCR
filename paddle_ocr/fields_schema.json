@@ -1,0 +1,188 @@
+{
+  "document_type": "منشأة / سجل تجاري",
+  "fields": [
+    {
+      "key": "establishment_name",
+      "label": "اسم المنشأة بالكامل",
+      "description": "الاسم التجاري الكامل للمنشأة كما يظهر بجانب تسمية الاسم أو الشركة.",
+      "aliases": [
+        "اسم المنشأة بالكامل",
+        "اسم المنشأة",
+        "اسم الشركة",
+        "الاسم التجاري",
+        "اسم التاجر",
+        "المنشأة",
+        "Trade Name",
+        "Company Name"
+      ],
+      "value_type": "arabic_name",
+      "required": true,
+      "min_length": 3,
+      "prefer_longest": true
+    },
+    {
+      "key": "commercial_register",
+      "label": "رقم السجل التجاري",
+      "description": "رقم السجل التجاري الرسمي للمنشأة.",
+      "aliases": [
+        "رقم السجل التجاري",
+        "السجل التجاري",
+        "رقم السجل",
+        "Commercial Register",
+        "CR"
+      ],
+      "value_type": "digits",
+      "required": true,
+      "pattern": "^[0-9]{5,20}$"
+    },
+    {
+      "key": "tax_id",
+      "label": "الرقم الضريبي",
+      "description": "الرقم الضريبي أو رقم البطاقة الضريبية.",
+      "aliases": [
+        "الرقم الضريبي",
+        "رقم البطاقة الضريبية",
+        "البطاقة الضريبية",
+        "الرقم القومى للمنشأة",
+        "الرقم القومي للمنشأة",
+        "Tax ID",
+        "VAT"
+      ],
+      "value_type": "digits",
+      "required": false,
+      "pattern": "^[0-9]{9,15}$"
+    },
+    {
+      "key": "tax_file",
+      "label": "رقم الملف الضريبي",
+      "description": "رقم الملف الضريبي إن وُجد في المستند.",
+      "aliases": [
+        "رقم الملف الضريبي",
+        "الملف الضريبي",
+        "ملف ضريبي"
+      ],
+      "value_type": "alnum",
+      "required": false,
+      "pattern": "^[0-9A-Za-z\\-/]{5,30}$"
+    },
+    {
+      "key": "legal_form",
+      "label": "الشكل القانوني",
+      "description": "نوع الكيان القانوني (فردي، ذات مسؤولية محدودة، مساهمة...).",
+      "aliases": [
+        "الشكل القانوني",
+        "نوع الشركة",
+        "الكيان القانوني",
+        "Legal Form"
+      ],
+      "value_type": "text",
+      "required": false,
+      "min_length": 2
+    },
+    {
+      "key": "activity",
+      "label": "النشاط",
+      "description": "وصف النشاط أو الغرض من المنشأة.",
+      "aliases": [
+        "النشاط",
+        "نوع النشاط",
+        "النشاط التجاري",
+        "غرض الشركة",
+        "Activity"
+      ],
+      "value_type": "text",
+      "required": false,
+      "min_length": 3,
+      "prefer_longest": true
+    },
+    {
+      "key": "address",
+      "label": "العنوان",
+      "description": "عنوان المقر أو المركز الرئيسي.",
+      "aliases": [
+        "العنوان",
+        "عنوان المقر",
+        "المقر",
+        "المركز الرئيسي",
+        "مكان ممارسة النشاط",
+        "Address"
+      ],
+      "value_type": "text",
+      "required": false,
+      "min_length": 5,
+      "prefer_longest": true
+    },
+    {
+      "key": "owner_name",
+      "label": "اسم المالك / المدير",
+      "description": "اسم المالك أو المدير المسؤول.",
+      "aliases": [
+        "اسم المالك",
+        "المالك",
+        "اسم المدير",
+        "المدير المسؤول",
+        "اسم المسؤول",
+        "Owner"
+      ],
+      "value_type": "arabic_name",
+      "required": false,
+      "min_length": 3
+    },
+    {
+      "key": "issue_date",
+      "label": "تاريخ الإصدار",
+      "description": "تاريخ إصدار أو قيد المستند.",
+      "aliases": [
+        "تاريخ الإصدار",
+        "تاريخ القيد",
+        "تاريخ التسجيل",
+        "تاريخ البداية",
+        "Issue Date"
+      ],
+      "value_type": "date",
+      "required": false
+    },
+    {
+      "key": "phone",
+      "label": "رقم الهاتف",
+      "description": "رقم الهاتف أو الجوال.",
+      "aliases": [
+        "رقم الهاتف",
+        "الهاتف",
+        "الجوال",
+        "الموبايل",
+        "تليفون",
+        "Phone",
+        "Mobile"
+      ],
+      "value_type": "phone",
+      "required": false
+    },
+    {
+      "key": "email",
+      "label": "البريد الإلكتروني",
+      "description": "البريد الإلكتروني إن وُجد.",
+      "aliases": [
+        "البريد الإلكتروني",
+        "الايميل",
+        "Email",
+        "E-mail"
+      ],
+      "value_type": "email",
+      "required": false
+    },
+    {
+      "key": "capital",
+      "label": "رأس المال",
+      "description": "قيمة رأس المال المذكور في المستند.",
+      "aliases": [
+        "رأس المال",
+        "رأس المال المصدر",
+        "رأس المال المدفوع",
+        "Capital"
+      ],
+      "value_type": "money",
+      "required": false
+    }
+  ]
+}

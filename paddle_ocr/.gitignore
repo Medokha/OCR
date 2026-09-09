@@ -8,3 +8,4 @@ output/
 *.pdf
 server.log
 server.err.log
+data/

@@ -47,11 +47,45 @@ def _prepare_paddle_runtime() -> None:
 
 
 @dataclass
+class TextBlock:
+    text: str
+    score: float
+    x0: float
+    y0: float
+    x1: float
+    y1: float
+
+    @property
+    def cx(self) -> float:
+        return (self.x0 + self.x1) / 2.0
+
+    @property
+    def cy(self) -> float:
+        return (self.y0 + self.y1) / 2.0
+
+    @property
+    def width(self) -> float:
+        return max(self.x1 - self.x0, 1.0)
+
+    @property
+    def height(self) -> float:
+        return max(self.y1 - self.y0, 1.0)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "text": self.text,
+            "score": self.score,
+            "bbox": [self.x0, self.y0, self.x1, self.y1],
+        }
+
+
+@dataclass
 class PageResult:
     page_index: int
     text: str
     lines: list[str] = field(default_factory=list)
     scores: list[float] = field(default_factory=list)
+    blocks: list[TextBlock] = field(default_factory=list)
 
 
 @dataclass
@@ -151,12 +185,15 @@ class ArabicOcrEngine:
                 logger.info("OCR page %s/%s", index + 1, total)
                 raw_results = self._ocr.predict(input=image)
                 raw = (raw_results or [None])[0]
-                lines, scores = self._extract_lines(raw)
+                blocks = self._extract_blocks(raw)
+                lines = [b.text for b in blocks]
+                scores = [b.score for b in blocks]
                 yield PageResult(
                     page_index=index,
                     text="\n".join(lines).strip(),
                     lines=lines,
                     scores=scores,
+                    blocks=blocks,
                 )
         finally:
             pdf.close()
@@ -212,32 +249,109 @@ class ArabicOcrEngine:
             return fallback
 
     @classmethod
-    def _extract_lines(cls, raw: Any) -> tuple[list[str], list[float]]:
+    def _extract_blocks(cls, raw: Any) -> list[TextBlock]:
         data = cls._as_dict(raw)
-        texts = data.get("rec_texts") or data.get("texts") or []
-        scores_raw = data.get("rec_scores") or data.get("scores") or []
+        texts = cls._first_seq(data.get("rec_texts"), data.get("texts"))
+        scores_raw = cls._first_seq(data.get("rec_scores"), data.get("scores"))
+        boxes = cls._first_seq(
+            data.get("rec_boxes"),
+            data.get("dt_polys"),
+            data.get("rec_polys"),
+            data.get("boxes"),
+        )
 
-        lines: list[str] = []
-        for item in texts:
+        blocks: list[TextBlock] = []
+        for i, item in enumerate(texts):
             if item is None:
                 continue
             text = str(item).strip()
-            if text:
-                lines.append(text)
+            if not text:
+                continue
+            try:
+                score = float(scores_raw[i]) if i < len(scores_raw) else 0.0
+            except Exception:  # noqa: BLE001
+                score = 0.0
+            box = boxes[i] if i < len(boxes) else None
+            x0, y0, x1, y1 = cls._box_to_xyxy(box, i)
+            blocks.append(
+                TextBlock(text=text, score=score, x0=x0, y0=y0, x1=x1, y1=y1)
+            )
 
-        scores: list[float] = []
-        try:
-            for score in scores_raw:
-                scores.append(float(score))
-        except Exception:  # noqa: BLE001
-            scores = []
-
-        # Fallback for older-style nested results
-        if not lines and "ocr_result" in data:
-            for row in data["ocr_result"] or []:
+        if len(blocks) == 0 and "ocr_result" in data:
+            for i, row in enumerate(data.get("ocr_result") or []):
                 if isinstance(row, dict) and row.get("text"):
-                    lines.append(str(row["text"]).strip())
+                    text = str(row["text"]).strip()
+                    box = row.get("box")
+                    if box is None:
+                        box = row.get("bbox")
+                    x0, y0, x1, y1 = cls._box_to_xyxy(box, i)
+                    try:
+                        score = float(row.get("score") or 0.0)
+                    except Exception:  # noqa: BLE001
+                        score = 0.0
+                    blocks.append(
+                        TextBlock(
+                            text=text,
+                            score=score,
+                            x0=x0,
+                            y0=y0,
+                            x1=x1,
+                            y1=y1,
+                        )
+                    )
                 elif isinstance(row, (list, tuple)) and len(row) >= 2:
-                    lines.append(str(row[1][0] if isinstance(row[1], (list, tuple)) else row[1]).strip())
+                    box = row[0]
+                    rec = row[1]
+                    text = str(rec[0] if isinstance(rec, (list, tuple)) else rec).strip()
+                    score = (
+                        float(rec[1])
+                        if isinstance(rec, (list, tuple)) and len(rec) > 1
+                        else 0.0
+                    )
+                    x0, y0, x1, y1 = cls._box_to_xyxy(box, i)
+                    if text:
+                        blocks.append(
+                            TextBlock(
+                                text=text, score=score, x0=x0, y0=y0, x1=x1, y1=y1
+                            )
+                        )
+        return blocks
 
-        return lines, scores
+    @staticmethod
+    def _first_seq(*candidates: Any) -> list[Any]:
+        """Pick first non-None sequence without bool()-testing numpy arrays."""
+        for value in candidates:
+            if value is None:
+                continue
+            try:
+                return list(value)
+            except TypeError:
+                continue
+        return []
+
+    @staticmethod
+    def _box_to_xyxy(box: Any, fallback_index: int) -> tuple[float, float, float, float]:
+        if box is None:
+            y = float(fallback_index) * 40.0
+            return 0.0, y, 400.0, y + 30.0
+        try:
+            import numpy as np
+
+            arr = np.asarray(box, dtype=float)
+            if arr.size == 0:
+                y = float(fallback_index) * 40.0
+                return 0.0, y, 400.0, y + 30.0
+            if arr.ndim == 1 and arr.size >= 4:
+                return float(arr[0]), float(arr[1]), float(arr[2]), float(arr[3])
+            flat = arr.reshape(-1, 2)
+            xs = flat[:, 0]
+            ys = flat[:, 1]
+            return float(xs.min()), float(ys.min()), float(xs.max()), float(ys.max())
+        except Exception:  # noqa: BLE001
+            y = float(fallback_index) * 40.0
+            return 0.0, y, 400.0, y + 30.0
+
+    @classmethod
+    def _extract_lines(cls, raw: Any) -> tuple[list[str], list[float]]:
+        blocks = cls._extract_blocks(raw)
+        return [b.text for b in blocks], [b.score for b in blocks]
