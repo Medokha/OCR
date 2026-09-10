@@ -71,13 +71,32 @@
             <h2>البيانات المستخرجة</h2>
             <p id="id-meta" class="meta"></p>
           </div>
-          <div id="id-fields" class="id-fields-grid"></div>
 
-          <div class="id-crops-box">
-            <h3>مصدر كل حقل من الصورة (وجه / ظهر)</h3>
-            <p class="meta">قصّة المنطقة اللي اتقرأ منها الاسم، العنوان، الرقم القومي، وباقي حقول الظهر</p>
-            <div id="id-crops" class="id-crops-grid"></div>
-          </div>
+          <div id="id-side-badge" class="id-side-badge" hidden></div>
+
+          <section id="form-front" class="id-form-panel" hidden>
+            <header class="id-form-head">
+              <h3>نموذج الوجه</h3>
+              <p class="meta">الاسم · العنوان · الرقم القومي · الميلاد (من المعادلة)</p>
+            </header>
+            <div id="id-fields-front" class="id-fields-grid"></div>
+            <div class="id-crops-box">
+              <h3>قصّات الوجه</h3>
+              <div id="id-crops-front" class="id-crops-grid"></div>
+            </div>
+          </section>
+
+          <section id="form-back" class="id-form-panel" hidden>
+            <header class="id-form-head">
+              <h3>نموذج الظهر</h3>
+              <p class="meta">المهنة · النوع · الديانة · الحالة الاجتماعية · السريان</p>
+            </header>
+            <div id="id-fields-back" class="id-fields-grid"></div>
+            <div class="id-crops-box">
+              <h3>قصّات الظهر</h3>
+              <div id="id-crops-back" class="id-crops-grid"></div>
+            </div>
+          </section>
 
           <div class="id-rules-box">
             <h3>القواعد والمعادلات المطبّقة</h3>

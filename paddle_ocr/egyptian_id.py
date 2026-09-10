@@ -1598,70 +1598,89 @@ def apply_field_rules(
             or back_fields.get("marital_status")
         ):
             fields["card_side"] = "الظهر"
+            side = "back"
             rules_fired.append("DETECT: اعتُبرت ظهر البطاقة")
 
-    # Labeled fallbacks (front or back)
-    if not fields.get("job"):
-        job = extract_value_after_label(tokens, ("المهنه", "المهنة", "مهنة"))
-        if job:
-            fields["job"] = job
-            rules_fired.append("LABEL: المهنة")
+    # Labeled fallbacks — only for the active side (avoid front/back bleed)
+    if side == "back":
+        if not fields.get("job"):
+            job = extract_value_after_label(tokens, ("المهنه", "المهنة", "مهنة"))
+            if job:
+                fields["job"] = job
+                rules_fired.append("LABEL: المهنة")
 
-    if not fields.get("religion"):
-        religion = extract_value_after_label(
-            tokens, ("الديانه", "الديانة", "ديانة"), value_hints=RELIGION_VALUES
-        )
-        if religion:
-            fields["religion"] = religion
-            rules_fired.append("LABEL/HINT: الديانة")
-
-    if not fields.get("marital_status"):
-        marital = extract_value_after_label(
-            tokens,
-            ("الحاله الاجتماعيه", "الحالة الاجتماعية", "الحاله", "الحالة", "اجتماعية"),
-            value_hints=MARITAL_VALUES,
-        )
-        if marital:
-            fields["marital_status"] = marital
-            rules_fired.append("LABEL/HINT: الحالة الاجتماعية")
-
-    if not fields.get("gender"):
-        gender_ocr = extract_value_after_label(
-            tokens, ("الجنس",), value_hints=GENDER_VALUES
-        )
-        if gender_ocr:
-            fields["gender"] = (
-                "ذكر" if normalize_ar(gender_ocr) == "ذكر" else "أنثى"
+        if not fields.get("religion"):
+            religion = extract_value_after_label(
+                tokens, ("الديانه", "الديانة", "ديانة"), value_hints=RELIGION_VALUES
             )
-            rules_fired.append("LABEL: الجنس")
+            if religion:
+                fields["religion"] = religion
+                rules_fired.append("LABEL/HINT: الديانة")
 
-    if not fields.get("husband_name"):
-        husband = extract_value_after_label(tokens, ("اسم الزوج", "الزوج", "زوج"))
-        if husband and "مهن" not in normalize_ar(husband):
-            fields["husband_name"] = husband
-            rules_fired.append("LABEL: اسم الزوج")
+        if not fields.get("marital_status"):
+            marital = extract_value_after_label(
+                tokens,
+                ("الحاله الاجتماعيه", "الحالة الاجتماعية", "الحاله", "الحالة", "اجتماعية"),
+                value_hints=MARITAL_VALUES,
+            )
+            if marital:
+                fields["marital_status"] = marital
+                rules_fired.append("LABEL/HINT: الحالة الاجتماعية")
 
-    if not fields.get("expiry_date"):
-        exp = extract_expiry_date([t.text for t in tokens])
-        if exp:
-            fields["expiry_date"] = exp
-            rules_fired.append("BACK: تاريخ السريان")
+        if not fields.get("gender"):
+            gender_ocr = extract_value_after_label(
+                tokens, ("الجنس",), value_hints=GENDER_VALUES
+            )
+            if gender_ocr:
+                fields["gender"] = (
+                    "ذكر" if normalize_ar(gender_ocr) == "ذكر" else "أنثى"
+                )
+                rules_fired.append("LABEL: الجنس")
 
-    if not fields.get("marital_status"):
-        for t in tokens:
-            m = _match_known_value(t.text, MARITAL_VALUES)
-            if m:
-                fields["marital_status"] = m
-                rules_fired.append("HINT: حالة اجتماعية")
-                break
+        if not fields.get("husband_name"):
+            husband = extract_value_after_label(tokens, ("اسم الزوج", "الزوج", "زوج"))
+            if husband and "مهن" not in normalize_ar(husband):
+                fields["husband_name"] = husband
+                rules_fired.append("LABEL: اسم الزوج")
 
-    if not fields.get("religion"):
-        for t in tokens:
-            r = _match_known_value(t.text, RELIGION_VALUES)
-            if r:
-                fields["religion"] = r
-                rules_fired.append("HINT: ديانة")
-                break
+        if not fields.get("expiry_date"):
+            exp = extract_expiry_date([t.text for t in tokens])
+            if exp:
+                fields["expiry_date"] = exp
+                rules_fired.append("BACK: تاريخ السريان")
+
+        if not fields.get("marital_status"):
+            for t in tokens:
+                m = _match_known_value(t.text, MARITAL_VALUES)
+                if m:
+                    fields["marital_status"] = m
+                    rules_fired.append("HINT: حالة اجتماعية")
+                    break
+
+        if not fields.get("religion"):
+            for t in tokens:
+                r = _match_known_value(t.text, RELIGION_VALUES)
+                if r:
+                    fields["religion"] = r
+                    rules_fired.append("HINT: ديانة")
+                    break
+
+    # Clear opposite-side fields so JSON/UI never mix
+    if side == "front":
+        for k in (
+            "job",
+            "religion",
+            "marital_status",
+            "husband_name",
+            "expiry_date",
+        ):
+            fields[k] = None
+        fields["card_side"] = "الوجه"
+    elif side == "back":
+        for k in ("full_name", "address"):
+            fields[k] = None
+        # Keep national_id/derived if found on back; card_side = ظهر
+        fields["card_side"] = "الظهر"
 
     return fields, decoded, rules_fired
 
