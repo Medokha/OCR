@@ -34,6 +34,7 @@
     ["religion", "الديانة"],
     ["marital_status", "الحالة الاجتماعية"],
     ["husband_name", "اسم الزوج"],
+    ["expiry_date", "سريان البطاقة حتى"],
     ["card_side", "وجه البطاقة"],
   ];
 
@@ -47,6 +48,7 @@
     marital_status: "منطقة الحالة الاجتماعية (الظهر)",
     gender: "منطقة الجنس",
     husband_name: "منطقة اسم الزوج (الظهر)",
+    expiry_date: "منطقة تاريخ السريان (الظهر)",
   };
 
   const ALLOWED = new Set([
@@ -130,6 +132,7 @@
       "marital_status",
       "gender",
       "husband_name",
+      "expiry_date",
     ];
 
     if (images && images.face) {

@@ -26,6 +26,57 @@ YUNET_URL = (
     "face_detection_yunet/face_detection_yunet_2023mar.onnx"
 )
 
+# ---------------------------------------------------------------------------
+# Egyptian ID layout zones (normalized 0..1 of the warped card image)
+# Format per box: (x0, y0, x1, y1)  → left, top, right, bottom
+#
+# FRONT (from real card photos):
+#   photo LEFT | Arabic text RIGHT | national ID bottom strip
+#
+# BACK:
+#   job / status / expiry above the 2D barcode
+# ---------------------------------------------------------------------------
+ID_ZONES: dict[str, dict[str, tuple[float, float, float, float]]] = {
+    "front": {
+        # الصورة الشخصية — يسار الوجه
+        "face": (0.02, 0.08, 0.34, 0.62),
+        # الهيدر الأخضر: جمهورية مصر / بطاقة تحقيق الشخصية
+        "header": (0.34, 0.02, 0.98, 0.22),
+        # الاسم سطرين (يمين) — فوق العنوان
+        "name": (0.34, 0.20, 0.98, 0.44),
+        # العنوان سطرين تحت الاسم
+        "address": (0.34, 0.44, 0.98, 0.70),
+        # الرقم القومي 14 رقم — شريط سفلي يمين
+        "national_id": (0.28, 0.72, 0.98, 0.94),
+        # رقم المصنع اللاتيني أسفل اليسار
+        "serial": (0.02, 0.88, 0.30, 0.99),
+    },
+    "back": {
+        # المهنة
+        "job": (0.05, 0.04, 0.95, 0.30),
+        # نوع / ديانة / حالة اجتماعية (سطر واحد)
+        "status": (0.05, 0.26, 0.95, 0.44),
+        # البطاقة سارية حتى …
+        "expiry": (0.05, 0.40, 0.95, 0.58),
+        # الباركود ثنائي الأبعاد
+        "barcode": (0.02, 0.55, 0.98, 0.98),
+    },
+}
+
+# Colors for drawing zone overlays (BGR)
+ID_ZONE_COLORS: dict[str, tuple[int, int, int]] = {
+    "face": (80, 180, 40),
+    "header": (60, 160, 220),
+    "name": (40, 140, 80),
+    "address": (180, 110, 40),
+    "national_id": (40, 40, 220),
+    "serial": (160, 160, 160),
+    "job": (40, 140, 80),
+    "status": (180, 110, 40),
+    "expiry": (40, 40, 220),
+    "barcode": (120, 120, 120),
+}
+
 GOVERNORATES: dict[str, str] = {
     "01": "القاهرة",
     "02": "الإسكندرية",
@@ -105,7 +156,31 @@ _DIGITS_MAP = str.maketrans(
 )
 
 FRONT_HINTS = ("جمهوريه", "جمهورية", "مصر", "العربيه", "العربية", "بطاقه", "بطاقة", "تحقيق", "الشخصيه", "الشخصية", "قومي")
-BACK_HINTS = ("المهنه", "المهنة", "الديانه", "الديانة", "الحاله", "الحالة", "اجتماعيه", "اجتماعية", "الجنس", "ذكر", "انثى", "أنثى")
+BACK_HINTS = (
+    "المهنه",
+    "المهنة",
+    "الديانه",
+    "الديانة",
+    "الحاله",
+    "الحالة",
+    "اجتماعيه",
+    "اجتماعية",
+    "الجنس",
+    "ذكر",
+    "انثى",
+    "أنثى",
+    "اعزب",
+    "أعزب",
+    "متزوج",
+    "مسلم",
+    "مسيحي",
+    "ساريه",
+    "سارية",
+    "مهندس",
+    "تخصص",
+    "البطاقه ساريه",
+    "البطاقة سارية",
+)
 HEADER_NOISE = (
     "جمهوريه مصر العربيه",
     "جمهورية مصر العربية",
@@ -119,8 +194,45 @@ HEADER_NOISE = (
 )
 
 RELIGION_VALUES = ("مسلم", "مسيحي", "مسيحى", "يهودي", "يهودى", "بدون")
-MARITAL_VALUES = ("اعزب", "أعزب", "متزوج", "مطلق", "أرمل", "ارمل", "آنسة", "انسه", "متزوجة", "مطلقة", "ارملة")
+MARITAL_VALUES = (
+    "اعزب",
+    "أعزب",
+    "متزوج",
+    "متزوجه",
+    "متزوجة",
+    "مطلق",
+    "مطلقه",
+    "مطلقة",
+    "أرمل",
+    "ارمل",
+    "ارمله",
+    "أرملة",
+    "آنسة",
+    "انسه",
+    "انسة",
+)
 GENDER_VALUES = ("ذكر", "انثى", "أنثى", "انثي")
+JOB_HINTS = (
+    "مهندس",
+    "طبيب",
+    "محاسب",
+    "محامي",
+    "مدرس",
+    "معلم",
+    "موظف",
+    "طالب",
+    "ربة منزل",
+    "ربه منزل",
+    "تخصص",
+    "عامل",
+    "فني",
+    "صيدلي",
+    "ممرض",
+    "ضابط",
+    "حرفي",
+    "تاجر",
+    "لا يعمل",
+)
 
 
 def normalize_ar(text: str) -> str:
@@ -339,21 +451,76 @@ def detect_faces(image_bgr: np.ndarray) -> list[tuple[int, int, int, int]]:
     return boxes
 
 
+def face_box_norm(image_bgr: np.ndarray) -> tuple[float, float, float, float] | None:
+    """Normalized (x0,y0,x1,y1) of the personal photo (LEFT side on Egyptian ID)."""
+    h, w = image_bgr.shape[:2]
+    if h <= 0 or w <= 0:
+        return None
+    faces = detect_faces(image_bgr)
+    leftish: list[tuple[int, int, int, int]] = []
+    for x, y, bw, bh in faces:
+        cx = (x + bw / 2) / w
+        # Egyptian ID personal photo sits on the LEFT of the front
+        if cx <= 0.45:
+            leftish.append((x, y, bw, bh))
+    if leftish:
+        leftish.sort(key=lambda b: b[2] * b[3], reverse=True)
+        x, y, bw, bh = leftish[0]
+        return (x / w, y / h, (x + bw) / w, (y + bh) / h)
+    # Fixed layout fallback from ID_ZONES
+    return ID_ZONES["front"]["face"]
+
+
 def crop_face(image_bgr: np.ndarray, pad: float = 0.28) -> np.ndarray | None:
     faces = detect_faces(image_bgr)
-    if not faces:
-        h, w = image_bgr.shape[:2]
-        x0, y0 = int(w * 0.68), int(h * 0.16)
-        x1, y1 = int(w * 0.97), int(h * 0.74)
-        roi = image_bgr[y0:y1, x0:x1]
+    h, w = image_bgr.shape[:2]
+    chosen = None
+    if faces:
+        leftish = [b for b in faces if (b[0] + b[2] / 2) / max(w, 1) <= 0.45]
+        pool = leftish or faces
+        chosen = max(pool, key=lambda b: b[2] * b[3])
+    if chosen is None:
+        x0, y0, x1, y1 = ID_ZONES["front"]["face"]
+        px0, py0 = int(x0 * w), int(y0 * h)
+        px1, py1 = int(x1 * w), int(y1 * h)
+        roi = image_bgr[py0:py1, px0:px1]
         return roi if roi.size else None
-    x, y, bw, bh = faces[0]
+    x, y, bw, bh = chosen
     px, py = int(bw * pad), int(bh * pad)
     x0 = max(0, x - px)
     y0 = max(0, y - py)
-    x1 = min(image_bgr.shape[1], x + bw + px)
-    y1 = min(image_bgr.shape[0], y + bh + py)
+    x1 = min(w, x + bw + px)
+    y1 = min(h, y + bh + py)
     return image_bgr[y0:y1, x0:x1]
+
+
+def draw_id_zones(
+    image_bgr: np.ndarray,
+    side: str,
+    *,
+    thickness: int = 2,
+) -> np.ndarray:
+    """Draw labeled ID_ZONES boxes on a copy of the card (no OCR)."""
+    out = image_bgr.copy()
+    h, w = out.shape[:2]
+    zones = ID_ZONES.get(side) or {}
+    for name, (x0, y0, x1, y1) in zones.items():
+        color = ID_ZONE_COLORS.get(name, (0, 255, 255))
+        p0 = (int(x0 * w), int(y0 * h))
+        p1 = (int(x1 * w), int(y1 * h))
+        cv2.rectangle(out, p0, p1, color, thickness)
+        label = f"{name} ({x0:.2f},{y0:.2f})-({x1:.2f},{y1:.2f})"
+        cv2.putText(
+            out,
+            label,
+            (p0[0] + 4, max(16, p0[1] + 18)),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.45,
+            color,
+            1,
+            cv2.LINE_AA,
+        )
+    return out
 
 
 @dataclass
@@ -433,11 +600,188 @@ def guess_side(tokens: list[OcrToken]) -> str:
     blob = normalize_ar(" ".join(t.text for t in tokens))
     front = sum(1 for h in FRONT_HINTS if h in blob)
     back = sum(1 for h in BACK_HINTS if h in blob)
-    if back >= 2 and back >= front:
+    if any(
+        k in blob
+        for k in ("ساريه حتى", "سارية حتى", "اعزب", "مسلم", "مهندس", "تخصص", "ساريه", "سارية")
+    ):
+        back += 3
+    if any(k in blob for k in ("محل اقامه", "محل الاقامه", "بطاقه تحقيق", "جمهوريه مصر")):
+        front += 2
+    if back > front and back >= 2:
         return "back"
     if front >= 1 or find_national_id_from_tokens(tokens):
+        if back >= 4 and back > front:
+            return "back"
         return "front"
+    if back >= 1:
+        return "back"
     return "unknown"
+
+
+def _match_known_value(text: str, values: tuple[str, ...]) -> str | None:
+    n = normalize_ar(text)
+    for v in values:
+        vn = normalize_ar(v)
+        if n == vn or vn == n:
+            return v
+    for part in re.split(r"\s+", n):
+        for v in values:
+            if part == normalize_ar(v):
+                return v
+    return None
+
+
+def extract_expiry_date(texts: list[str]) -> str | None:
+    for text in texts:
+        n = normalize_ar(text)
+        ascii_t = to_ascii_digits(text)
+        interesting = ("ساريه" in n) or ("سارية" in n) or ("حتى" in n) or ("بطاقه" in n)
+        if not interesting and "بطاقة" not in text:
+            continue
+        m = re.search(r"(20\d{2})\s*[/\-]\s*(\d{1,2})\s*[/\-]\s*(\d{1,2})", ascii_t)
+        if m:
+            y, mo, d = m.group(1), int(m.group(2)), int(m.group(3))
+            return f"{y}-{mo:02d}-{d:02d}"
+        m2 = re.search(r"(\d{1,2})\s*[/\-]\s*(\d{1,2})\s*[/\-]\s*(20\d{2})", ascii_t)
+        if m2:
+            a, b, y = int(m2.group(1)), int(m2.group(2)), m2.group(3)
+            # prefer day-month-year if first <= 31
+            if a <= 31:
+                return f"{y}-{b:02d}-{a:02d}"
+            return f"{y}-{a:02d}-{b:02d}"
+    joined_n = normalize_ar(" ".join(texts))
+    joined_a = to_ascii_digits(" ".join(texts))
+    if "ساري" in joined_n or "حتى" in joined_n:
+        m = re.search(r"(20\d{2})\s*[/\-]\s*(\d{1,2})\s*[/\-]\s*(\d{1,2})", joined_a)
+        if m:
+            y, mo, d = m.group(1), int(m.group(2)), int(m.group(3))
+            return f"{y}-{mo:02d}-{d:02d}"
+    return None
+
+
+def extract_back_fields(tokens: list[OcrToken]) -> tuple[dict[str, Any], list[str]]:
+    """Parse Egyptian ID back layout: job + status row + expiry."""
+    notes: list[str] = []
+    out: dict[str, Any] = {
+        "job": None,
+        "gender": None,
+        "religion": None,
+        "marital_status": None,
+        "husband_name": None,
+        "expiry_date": None,
+        "national_id": None,
+    }
+
+    usable = [t for t in tokens if t.cy <= 0.85]
+    if not usable:
+        usable = list(tokens)
+
+    lines = _cluster_tokens_into_lines(usable, y_thresh=0.045)
+    line_texts = [_merge_line_scraps(_line_text(ln)) for ln in lines]
+    line_texts = [t for t in line_texts if t]
+    notes.append(f"BACK_LINES={len(line_texts)}")
+
+    nid = find_national_id_from_tokens(usable)
+    if nid:
+        out["national_id"] = nid
+        notes.append("BACK: رقم قومي")
+
+    exp = extract_expiry_date(line_texts)
+    if exp:
+        out["expiry_date"] = exp
+        notes.append("BACK: تاريخ السريان")
+
+    status_norms = {
+        normalize_ar(x) for x in RELIGION_VALUES + MARITAL_VALUES + GENDER_VALUES
+    }
+
+    for t in usable:
+        text = t.text.strip()
+        if not out["gender"]:
+            g = _match_known_value(text, GENDER_VALUES)
+            if g:
+                out["gender"] = "ذكر" if normalize_ar(g) == "ذكر" else "أنثى"
+                notes.append("BACK: النوع")
+        if not out["religion"]:
+            r = _match_known_value(text, RELIGION_VALUES)
+            if r:
+                out["religion"] = r
+                notes.append("BACK: الديانة")
+        if not out["marital_status"]:
+            m = _match_known_value(text, MARITAL_VALUES)
+            if m:
+                out["marital_status"] = m
+                notes.append("BACK: الحالة الاجتماعية")
+
+    for text in line_texts:
+        if not out["gender"]:
+            g = _match_known_value(text, GENDER_VALUES)
+            if g:
+                out["gender"] = "ذكر" if normalize_ar(g) == "ذكر" else "أنثى"
+        if not out["religion"]:
+            r = _match_known_value(text, RELIGION_VALUES)
+            if r:
+                out["religion"] = r
+        if not out["marital_status"]:
+            m = _match_known_value(text, MARITAL_VALUES)
+            if m:
+                out["marital_status"] = m
+
+    job_candidates: list[tuple[float, str]] = []
+    for ln in lines:
+        if not ln:
+            continue
+        cy = sum(t.cy for t in ln) / len(ln)
+        text = _merge_line_scraps(_line_text(ln))
+        if not text:
+            continue
+        n = normalize_ar(text)
+        if len(_digit_soup(text)) >= 10:
+            continue
+        if "ساريه" in n or "سارية" in n or ("حتى" in n and re.search(r"20\d{2}", to_ascii_digits(text))):
+            continue
+        if n in status_norms:
+            continue
+        parts = [p for p in re.split(r"\s+", n) if p]
+        if parts and all(p in status_norms for p in parts):
+            continue
+        if _is_header_noise(text):
+            continue
+        for lbl in ("المهنه", "المهنة", "مهنة"):
+            if lbl in n:
+                after = n.split(lbl, 1)[-1].strip(" :：-")
+                if after:
+                    text = after
+                    n = normalize_ar(after)
+                break
+        score = min(len(text), 70) / 20.0
+        if any(normalize_ar(h) in n for h in JOB_HINTS):
+            score += 4.0
+        if cy < 0.50:
+            score += 1.5
+        if 0.05 <= cy <= 0.58 and _arabic_ratio(text) >= 0.55 and len(text) >= 6:
+            job_candidates.append((score, text.strip()))
+
+    if job_candidates:
+        job_candidates.sort(key=lambda x: x[0], reverse=True)
+        out["job"] = job_candidates[0][1]
+        notes.append("BACK: المهنة")
+
+    for i, t in enumerate(usable):
+        n = t.norm_text
+        if "اسم الزوج" in n or (n.startswith("زوج") and "مهن" not in n):
+            after = re.split(r"الزوج|زوج", n, maxsplit=1)[-1].strip(" :：-")
+            if after and len(after) >= 3 and "مهن" not in after:
+                out["husband_name"] = after
+            elif i + 1 < len(usable):
+                cand = usable[i + 1].text.strip()
+                if cand and "مهن" not in normalize_ar(cand):
+                    out["husband_name"] = cand
+            if out["husband_name"]:
+                notes.append("BACK: اسم الزوج")
+            break
+
+    return out, notes
 
 
 def _digit_soup(text: str) -> str:
@@ -492,6 +836,13 @@ def _is_header_noise(text: str) -> bool:
         if normalize_ar(h) == n or normalize_ar(h) in n and len(n) <= len(normalize_ar(h)) + 2:
             return True
     if any(k in n for k in ("جمهوريه مصر", "بطاقه تحقيق", "وزاره الداخليه")):
+        return True
+    # OCR scraps of the republic / ID title line
+    if n.startswith("جمهور") or "جمهور" in n:
+        return True
+    if "بطاق" in n and ("شخص" in n or "تحقيق" in n):
+        return True
+    if "وزاره" in n or "داخليه" in n:
         return True
     return False
 
@@ -681,7 +1032,7 @@ def _is_strong_address_start(text: str) -> bool:
 
 
 def _looks_like_person_name(text: str) -> bool:
-    """Heuristic: Arabic name line (1–4 words), not address/place."""
+    """Heuristic: Arabic name line (1–5 words), not address/place."""
     raw = (text or "").strip()
     n = normalize_ar(raw)
     if len(n) < 2 or len(n) > 45:
@@ -698,13 +1049,13 @@ def _looks_like_person_name(text: str) -> bool:
         return False
     if n in {normalize_ar(x) for x in RELIGION_VALUES + MARITAL_VALUES + GENDER_VALUES}:
         return False
-    if any(k in n for k in ("جمهوريه", "بطاقه", "وزاره", "تحقيق", "شخصيه", "قومي", "اقامه")):
+    if any(k in n for k in ("جمهوريه", "جمهور", "بطاقه", "وزاره", "تحقيق", "شخصيه", "قومي", "اقامه")):
         return False
     words = [w for w in re.split(r"\s+", n) if w]
-    if not (1 <= len(words) <= 4):
+    if not (1 <= len(words) <= 5):
         return False
-    # Reject very short OCR scraps like "قية" / "شر" unless common name length >= 3
-    if len(words) == 1 and len(words[0]) < 3:
+    # Reject very short OCR scraps like "قية" / "شر"
+    if len(words) == 1 and len(words[0]) < 2:
         return False
     return True
 
@@ -839,12 +1190,79 @@ def _merge_line_scraps(text: str) -> str:
     return out
 
 
-def extract_name_and_address(
-    tokens: list[OcrToken], side: str
-) -> tuple[str | None, str | None, list[str]]:
-    """Egyptian ID front: name = 2 lines, address = 2 lines (clustered by Y).
+def _score_name_line(text: str, cy: float) -> float:
+    if not text or _is_header_noise(text) or _is_address_label(text):
+        return -10.0
+    if _is_strong_address_start(text) or (
+        _looks_like_address(text) and not _looks_like_person_name(text)
+    ):
+        return -5.0
+    if len(_digit_soup(text)) >= 1:
+        return -3.0
+    n = normalize_ar(text)
+    score = 0.0
+    if _looks_like_person_name(text):
+        score += 4.0
+    if _arabic_ratio(text) >= 0.75:
+        score += 1.5
+    words = [w for w in re.split(r"\s+", n) if w]
+    if len(words) == 1 and 2 <= len(words[0]) <= 12:
+        score += 2.0  # first-name line
+    if 2 <= len(words) <= 5:
+        score += 2.5  # remaining name line
+    if 0.12 <= cy <= 0.48:
+        score += 2.0
+    elif cy > 0.55:
+        score -= 2.0
+    return score
 
-    Ground truth layout from real cards:
+
+def _score_address_line(text: str, cy: float) -> float:
+    if not text or _is_header_noise(text):
+        return -10.0
+    rest = _strip_address_label_prefix(text)
+    if _is_address_label(text) and len(normalize_ar(rest)) < 3:
+        return 0.5  # label only
+    n = normalize_ar(rest)
+    digits = _digit_soup(rest)
+    # Pure / mostly numeric OCR noise (years, serials) is not an address
+    if len(digits) >= 6 and _arabic_ratio(rest) < 0.35:
+        return -8.0
+    if len(digits) >= 10 and "ش" not in n and not any(
+        normalize_ar(p) in n for p in ADDRESS_PLACE_WORDS
+    ):
+        return -8.0
+    score = 0.0
+    if _is_strong_address_start(rest) or _is_strong_address_start(text):
+        score += 5.0
+    if _looks_like_address(rest):
+        score += 3.0
+    if "-" in text or "–" in text:
+        score += 1.5
+    if any(normalize_ar(p) in n for p in ADDRESS_PLACE_WORDS):
+        score += 2.0
+    if len(digits) >= 1 and "ش" in n:
+        score += 3.0
+    if _looks_like_person_name(rest) and not _looks_like_address(rest):
+        score -= 4.0
+    if 0.42 <= cy <= 0.80:
+        score += 2.0
+    if cy < 0.30:
+        score -= 2.0
+    if _arabic_ratio(rest) >= 0.4:
+        score += 0.5
+    return score
+
+
+def extract_name_and_address(
+    tokens: list[OcrToken],
+    side: str,
+    *,
+    face_box: tuple[float, float, float, float] | None = None,
+) -> tuple[str | None, str | None, list[str]]:
+    """Egyptian ID front: exactly 2 name lines + 2 address lines.
+
+    Ground truth:
       name L1: محمود
       name L2: عصام عبدالعزيز قطب محمد
       addr L1: ٩ ش عبدالقادر - الحكماء
@@ -854,20 +1272,39 @@ def extract_name_and_address(
     if side == "back":
         return None, None, notes
 
-    # Prefer left-of-photo column, but keep tokens that are clearly text
-    col = [t for t in tokens if t.cx <= 0.78]
+    # Drop tokens whose center sits inside the personal photo bbox.
+    # If filtering wipes the text column (bad/oversized face), keep all tokens.
+    if face_box is not None:
+        fx0, fy0, fx1, fy1 = face_box
+        notes.append(f"FACE_BOX=({fx0:.2f},{fy0:.2f})-({fx1:.2f},{fy1:.2f})")
+        filtered = [
+            t
+            for t in tokens
+            if not (fx0 <= t.cx <= fx1 and fy0 <= t.cy <= fy1)
+        ]
+        useful = [
+            t
+            for t in filtered
+            if _arabic_ratio(t.text) >= 0.5 and len(_digit_soup(t.text)) < 8
+        ]
+        if len(useful) >= 3:
+            col = filtered
+        else:
+            notes.append("FACE_FILTER_SKIP: عمود النص اختفى")
+            col = list(tokens)
+    else:
+        notes.append("FACE_BOX=none")
+        col = list(tokens)
     if len(col) < 3:
         col = list(tokens)
 
-    lines = _cluster_tokens_into_lines(col)
-    line_strs: list[str] = []
-    line_meta: list[tuple[float, str]] = []  # (cy, text)
+    lines = _cluster_tokens_into_lines(col, y_thresh=0.045)
+    line_meta: list[tuple[float, str, list[OcrToken]]] = []
     for ln in lines:
         raw = _line_text(ln)
         if not raw:
             continue
         cy = sum(t.cy for t in ln) / len(ln)
-        # Skip NID-only lines
         if len(_digit_soup(raw)) >= 10 and _arabic_ratio(raw) < 0.35:
             continue
         if _is_header_noise(raw):
@@ -875,120 +1312,116 @@ def extract_name_and_address(
         text = _merge_line_scraps(raw)
         if not text:
             continue
-        line_strs.append(text)
-        line_meta.append((cy, text))
+        line_meta.append((cy, text, ln))
 
     notes.append(f"LINES={len(line_meta)}")
+    if not line_meta:
+        return None, None, notes
 
-    name_lines: list[str] = []
+    # Score every line for name vs address
+    scored = []
+    for cy, text, ln in line_meta:
+        scored.append(
+            {
+                "cy": cy,
+                "text": text,
+                "name_s": _score_name_line(text, cy),
+                "addr_s": _score_address_line(text, cy),
+                "tokens": ln,
+            }
+        )
+
+    # Prefer vertical order: first name-like pair, then address-like pair
+    name_idxs: list[int] = []
+    for i, row in enumerate(scored):
+        if row["cy"] < 0.10:
+            continue
+        if row["name_s"] >= 3.0 and row["name_s"] > row["addr_s"]:
+            name_idxs.append(i)
+            if i + 1 < len(scored):
+                nxt = scored[i + 1]
+                if (
+                    nxt["name_s"] >= 2.0
+                    and nxt["name_s"] >= nxt["addr_s"]
+                    and not _is_strong_address_start(nxt["text"])
+                    and not _is_address_label(nxt["text"])
+                ):
+                    name_idxs.append(i + 1)
+            break
+
+    # If only one name line found, try pull previous short first-name
+    if len(name_idxs) == 1 and name_idxs[0] > 0:
+        prev = scored[name_idxs[0] - 1]
+        if prev["name_s"] >= 2.5 and len(normalize_ar(prev["text"]).split()) <= 2:
+            name_idxs = [name_idxs[0] - 1, name_idxs[0]]
+
+    # If still empty: take the top-most 1–2 Arabic non-address lines
+    if not name_idxs:
+        for i, row in enumerate(scored):
+            if row["cy"] < 0.12 or row["cy"] > 0.55:
+                continue
+            if row["addr_s"] > row["name_s"] and row["addr_s"] >= 3.0:
+                continue
+            if _arabic_ratio(row["text"]) >= 0.7 and len(_digit_soup(row["text"])) == 0:
+                name_idxs.append(i)
+            if len(name_idxs) >= 2:
+                break
+
+    name_idxs = name_idxs[:2]
+    name_lines = [scored[i]["text"] for i in name_idxs]
+
+    # Address: next 2 address-like lines in reading order (not score-reshuffled scraps)
+    start_i = (max(name_idxs) + 1) if name_idxs else 0
     addr_lines: list[str] = []
-    phase = "seek_name"
-
-    for cy, text in line_meta:
-        n = normalize_ar(text)
-
-        # Skip pure label lines (keep going)
+    for i in range(start_i, len(scored)):
+        row = scored[i]
+        text = row["text"]
         if _is_address_label(text) and len(_strip_address_label_prefix(text)) < 3:
-            if phase == "name" and name_lines:
-                phase = "address"
             notes.append("LINE: لابل محل الإقامة")
             continue
-
-        if phase == "seek_name":
-            if cy < 0.10:
-                continue
-            if _looks_like_person_name(text) or (
-                _arabic_ratio(text) >= 0.7 and len(_digit_soup(text)) == 0 and not _is_strong_address_start(text)
-            ):
-                # Accept short first-name line like «محمود» / even OCR «مود»
-                if len(n) >= 2:
-                    name_lines.append(text)
-                    phase = "name"
+        rest = _merge_line_scraps(_strip_address_label_prefix(text))
+        if not rest:
             continue
-
-        if phase == "name":
-            if _is_strong_address_start(text) or _is_address_label(text):
-                phase = "address"
-                rest = _strip_address_label_prefix(text)
-                if rest and (_is_strong_address_start(rest) or _looks_like_address(rest) or _digit_soup(rest)):
-                    addr_lines.append(_merge_line_scraps(rest))
-                continue
-            # Second name line (usual): remaining full name
-            if len(name_lines) < 2 and (
-                _looks_like_person_name(text)
-                or (_arabic_ratio(text) >= 0.65 and len(_digit_soup(text)) == 0 and not _looks_like_address(text))
-            ):
-                name_lines.append(text)
-                # After 2 name lines, next content is address
-                if len(name_lines) >= 2:
-                    phase = "expect_address"
-                continue
-            # Extra name words rarely on 3rd line — only if still clearly names and high
-            if len(name_lines) < 3 and _looks_like_person_name(text) and cy < 0.50:
-                name_lines.append(text)
-                continue
-            # Otherwise treat as address start
-            phase = "address"
-            if _arabic_ratio(text) >= 0.3 or _digit_soup(text):
-                addr_lines.append(_merge_line_scraps(_strip_address_label_prefix(text)))
+        if any(normalize_ar(rest) == normalize_ar(n) for n in name_lines):
             continue
-
-        if phase == "expect_address":
-            if _is_address_label(text) and len(_strip_address_label_prefix(text)) < 3:
-                phase = "address"
-                continue
-            phase = "address"
-            # fall through
-
-        if phase == "address":
-            if len(_digit_soup(text)) >= 10 and _arabic_ratio(text) < 0.4:
-                break
-            rest = _strip_address_label_prefix(text)
-            rest = _merge_line_scraps(rest)
-            if not rest:
-                continue
-            # Don't pull name lines into address
-            if any(normalize_ar(rest) == normalize_ar(nl) for nl in name_lines):
-                continue
-            if _looks_like_person_name(rest) and not _looks_like_address(rest) and not _digit_soup(rest) and len(addr_lines) == 0:
-                # misplaced name
-                if len(name_lines) < 2:
-                    name_lines.append(rest)
-                continue
+        if len(_digit_soup(rest)) >= 10 and _arabic_ratio(rest) < 0.4:
+            break
+        s = _score_address_line(rest, row["cy"])
+        if s >= 2.0 or _is_strong_address_start(rest) or _looks_like_address(rest):
             addr_lines.append(rest)
-            if len(addr_lines) >= 2:
-                phase = "done"
-                break
+        if len(addr_lines) >= 2:
+            break
+    addr_lines = _clean_address_parts(addr_lines)[:2]
 
-    # Fallback: first two non-header lines = name, next two = address
-    if not name_lines and line_meta:
-        cand = [t for _, t in line_meta if _arabic_ratio(t) >= 0.55 and len(_digit_soup(t)) < 6]
-        name_lines = cand[:2]
-        addr_lines = [t for t in cand[2:4] if t not in name_lines]
-        notes.append("FALLBACK: أول سطرين اسم / التاليين عنوان")
+    # Fallbacks
+    if not name_lines:
+        name_like = [
+            r for r in scored if r["name_s"] >= 2.5 and r["name_s"] >= r["addr_s"]
+        ]
+        name_lines = [r["text"] for r in name_like[:2]]
+        notes.append("FALLBACK: أعلى سطور الاسم درجة")
 
     if name_lines and not addr_lines:
-        # take following lines from meta after last name
-        seen_name = False
-        for _, text in line_meta:
-            if text in name_lines:
-                seen_name = True
+        after = False
+        tmp = []
+        for r in scored:
+            if r["text"] in name_lines:
+                after = True
                 continue
-            if not seen_name:
+            if not after:
                 continue
-            if _is_address_label(text) and len(_strip_address_label_prefix(text)) < 3:
-                continue
-            rest = _merge_line_scraps(_strip_address_label_prefix(text))
-            if rest and rest not in name_lines:
-                addr_lines.append(rest)
-            if len(addr_lines) >= 2:
+            rest = _merge_line_scraps(_strip_address_label_prefix(r["text"]))
+            if rest and _score_address_line(rest, r["cy"]) >= 1.5:
+                tmp.append(rest)
+            if len(tmp) >= 2:
                 break
+        addr_lines = _clean_address_parts(tmp)[:2]
         if addr_lines:
             notes.append("FALLBACK: عنوان بعد سطور الاسم")
 
-    # Final: Egyptian ID typically exactly 2 name lines + 2 address lines
+    # Egyptian ID front is typically exactly 2 + 2
     name_lines = name_lines[:2]
-    addr_lines = _clean_address_parts(addr_lines)[:2]
+    addr_lines = addr_lines[:2]
 
     full_name = " ".join(name_lines) if name_lines else None
     address = " ".join(addr_lines) if addr_lines else None
@@ -999,6 +1432,84 @@ def extract_name_and_address(
         notes.append(f"ADDR← {' || '.join(addr_lines)}")
 
     return full_name, address, notes
+
+
+def _lines_from_zone_ocr(raw_lines: list[str], *, kind: str) -> list[str]:
+    """Pick up to 2 cleaned lines from a dedicated name/address zone OCR."""
+    out: list[str] = []
+    for ln in raw_lines:
+        if kind == "name":
+            if _is_header_noise(ln) or _is_address_label(ln):
+                continue
+            if _is_strong_address_start(ln):
+                break
+            if len(_digit_soup(ln)) >= 6:
+                continue
+            cleaned = _merge_line_scraps(ln)
+            if not cleaned or len(normalize_ar(cleaned)) < 2:
+                continue
+            if _arabic_ratio(cleaned) < 0.55:
+                continue
+            out.append(cleaned)
+        else:
+            if _is_address_label(ln) and len(_strip_address_label_prefix(ln)) < 3:
+                continue
+            rest = _merge_line_scraps(_strip_address_label_prefix(ln))
+            if not rest or _is_header_noise(rest):
+                continue
+            if len(_digit_soup(rest)) >= 10 and _arabic_ratio(rest) < 0.35:
+                continue
+            if _arabic_ratio(rest) < 0.35 and not _digit_soup(rest):
+                continue
+            out.append(rest)
+        if len(out) >= 2:
+            break
+    if kind == "address":
+        out = _clean_address_parts(out)[:2]
+    return out[:2]
+
+
+def pick_best_front_zones(
+    engine: Any,
+    card: np.ndarray,
+    zone_lines_fn: Any,
+    *,
+    face_box: tuple[float, float, float, float] | None = None,
+) -> tuple[str | None, str | None, list[str]]:
+    """OCR exactly ID_ZONES['front']['name'] and ['address']; keep 2 lines each."""
+    notes: list[str] = []
+    nx0, ny0, nx1, ny1 = ID_ZONES["front"]["name"]
+    ax0, ay0, ax1, ay1 = ID_ZONES["front"]["address"]
+
+    # Text is to the RIGHT of the photo on Egyptian ID front
+    if face_box is not None and face_box[2] < 0.50:
+        nx0 = max(nx0, face_box[2] + 0.01)
+        ax0 = max(ax0, face_box[2] + 0.01)
+        notes.append(f"ZONE_CLIP_LEFT={nx0:.2f}")
+
+    notes.append(f"ZONE_NAME=({nx0:.2f},{ny0:.2f})-({nx1:.2f},{ny1:.2f})")
+    notes.append(f"ZONE_ADDR=({ax0:.2f},{ay0:.2f})-({ax1:.2f},{ay1:.2f})")
+
+    name_raw = zone_lines_fn(engine, card, ny0, ny1, nx0, nx1)
+    addr_raw = zone_lines_fn(engine, card, ay0, ay1, ax0, ax1)
+
+    name_lines = _lines_from_zone_ocr(name_raw, kind="name")
+    addr_lines = _lines_from_zone_ocr(addr_raw, kind="address")
+    # Drop address lines that duplicated the name
+    if name_lines:
+        addr_lines = [
+            a
+            for a in addr_lines
+            if not any(normalize_ar(a) == normalize_ar(n) for n in name_lines)
+        ][:2]
+
+    name = " ".join(name_lines) if name_lines else None
+    addr = " ".join(addr_lines) if addr_lines else None
+    if name:
+        notes.append(f"BAND_NAME← {' || '.join(name_lines)}")
+    if addr:
+        notes.append(f"BAND_ADDR← {' || '.join(addr_lines)}")
+    return name, addr, notes
 
 
 def extract_name_from_zones(tokens: list[OcrToken], side: str) -> str | None:
@@ -1016,6 +1527,8 @@ def extract_address_from_zones(
 def apply_field_rules(
     tokens: list[OcrToken],
     side: str,
+    *,
+    face_box: tuple[float, float, float, float] | None = None,
 ) -> tuple[dict[str, Any], dict[str, Any], list[str]]:
     """Map OCR tokens → fields using conditions + national-ID equations."""
     rules_fired: list[str] = []
@@ -1030,6 +1543,7 @@ def apply_field_rules(
         "religion": None,
         "marital_status": None,
         "husband_name": None,
+        "expiry_date": None,
         "card_side": "الوجه" if side == "front" else "الظهر" if side == "back" else "غير محدد",
     }
 
@@ -1050,72 +1564,104 @@ def apply_field_rules(
         fields["national_id"] = nid
         rules_fired.append("COND: عُثر على 14 رقم لكن فك التاريخ فشل")
 
-    # RULE 2+3: sequential OCR mapping for name then address (same lines as raw OCR)
-    name, address, seq_notes = extract_name_and_address(tokens, side)
-    if name:
-        fields["full_name"] = name
-        rules_fired.append("SEQ: الاسم من سطور OCR بعد الهيدر مباشرة")
-    if address:
-        fields["address"] = address
-        rules_fired.append("SEQ: العنوان/محل الإقامة بعد الاسم أو بعد لابل محل الإقامة")
-    rules_fired.extend(seq_notes)
+    # FRONT: name + address
+    if side != "back":
+        name, address, seq_notes = extract_name_and_address(
+            tokens, side, face_box=face_box
+        )
+        if name:
+            fields["full_name"] = name
+            rules_fired.append("SEQ: الاسم من سطور OCR بعد الهيدر")
+        if address:
+            fields["address"] = address
+            rules_fired.append("SEQ: العنوان/محل الإقامة")
+        rules_fired.extend(seq_notes)
 
-    # RULE 4: labeled back fields
-    job = extract_value_after_label(tokens, ("المهنه", "المهنة", "مهنة"))
-    if job:
-        fields["job"] = job
-        rules_fired.append("LABEL: المهنة → القيمة المجاورة/التالية")
+    # BACK: job / religion / marital / gender / expiry
+    if side == "back" or side == "unknown":
+        back_fields, back_notes = extract_back_fields(tokens)
+        for k, v in back_fields.items():
+            if not v:
+                continue
+            if k == "national_id" and fields.get("national_id"):
+                continue
+            if k == "gender" and fields.get("gender"):
+                # keep equation gender if present; note OCR
+                if normalize_ar(str(fields["gender"])) != normalize_ar(str(v)):
+                    rules_fired.append("BACK: نوع OCR مختلف عن معادلة الرقم — اعتُمدت المعادلة")
+                continue
+            fields[k] = v
+        rules_fired.extend(back_notes)
+        if side == "unknown" and (
+            back_fields.get("job")
+            or back_fields.get("expiry_date")
+            or back_fields.get("marital_status")
+        ):
+            fields["card_side"] = "الظهر"
+            rules_fired.append("DETECT: اعتُبرت ظهر البطاقة")
 
-    religion = extract_value_after_label(
-        tokens, ("الديانه", "الديانة", "ديانة"), value_hints=RELIGION_VALUES
-    )
-    if religion:
-        fields["religion"] = religion
-        rules_fired.append("LABEL/HINT: الديانة")
+    # Labeled fallbacks (front or back)
+    if not fields.get("job"):
+        job = extract_value_after_label(tokens, ("المهنه", "المهنة", "مهنة"))
+        if job:
+            fields["job"] = job
+            rules_fired.append("LABEL: المهنة")
 
-    marital = extract_value_after_label(
-        tokens,
-        ("الحاله الاجتماعيه", "الحالة الاجتماعية", "الحاله", "الحالة", "اجتماعية"),
-        value_hints=MARITAL_VALUES,
-    )
-    if marital:
-        fields["marital_status"] = marital
-        rules_fired.append("LABEL/HINT: الحالة الاجتماعية")
+    if not fields.get("religion"):
+        religion = extract_value_after_label(
+            tokens, ("الديانه", "الديانة", "ديانة"), value_hints=RELIGION_VALUES
+        )
+        if religion:
+            fields["religion"] = religion
+            rules_fired.append("LABEL/HINT: الديانة")
 
-    gender_ocr = extract_value_after_label(
-        tokens, ("الجنس",), value_hints=GENDER_VALUES
-    )
-    if gender_ocr and not fields["gender"]:
-        fields["gender"] = gender_ocr
-        rules_fired.append("LABEL: الجنس من ظهر البطاقة")
-    elif gender_ocr and fields["gender"]:
-        # Prefer equation gender; note mismatch
-        g_eq = normalize_ar(fields["gender"])
-        g_ocr = normalize_ar(gender_ocr)
-        if g_eq not in g_ocr and g_ocr not in g_eq:
-            rules_fired.append("COND: تعارض جنس OCR مع معادلة الرقم — اعتُمدت المعادلة")
+    if not fields.get("marital_status"):
+        marital = extract_value_after_label(
+            tokens,
+            ("الحاله الاجتماعيه", "الحالة الاجتماعية", "الحاله", "الحالة", "اجتماعية"),
+            value_hints=MARITAL_VALUES,
+        )
+        if marital:
+            fields["marital_status"] = marital
+            rules_fired.append("LABEL/HINT: الحالة الاجتماعية")
 
-    husband = extract_value_after_label(tokens, ("اسم الزوج", "الزوج", "زوج"))
-    if husband and "مهن" not in normalize_ar(husband):
-        fields["husband_name"] = husband
-        rules_fired.append("LABEL: اسم الزوج")
+    if not fields.get("gender"):
+        gender_ocr = extract_value_after_label(
+            tokens, ("الجنس",), value_hints=GENDER_VALUES
+        )
+        if gender_ocr:
+            fields["gender"] = (
+                "ذكر" if normalize_ar(gender_ocr) == "ذكر" else "أنثى"
+            )
+            rules_fired.append("LABEL: الجنس")
 
-    # RULE 5: if gender from ID is أنثى and marital missing, try common tokens
-    if not fields["marital_status"]:
+    if not fields.get("husband_name"):
+        husband = extract_value_after_label(tokens, ("اسم الزوج", "الزوج", "زوج"))
+        if husband and "مهن" not in normalize_ar(husband):
+            fields["husband_name"] = husband
+            rules_fired.append("LABEL: اسم الزوج")
+
+    if not fields.get("expiry_date"):
+        exp = extract_expiry_date([t.text for t in tokens])
+        if exp:
+            fields["expiry_date"] = exp
+            rules_fired.append("BACK: تاريخ السريان")
+
+    if not fields.get("marital_status"):
         for t in tokens:
-            for mv in MARITAL_VALUES:
-                if normalize_ar(mv) == t.norm_text:
-                    fields["marital_status"] = t.text.strip()
-                    rules_fired.append("HINT: قيمة حالة اجتماعية مباشرة من OCR")
-                    break
+            m = _match_known_value(t.text, MARITAL_VALUES)
+            if m:
+                fields["marital_status"] = m
+                rules_fired.append("HINT: حالة اجتماعية")
+                break
 
-    if not fields["religion"]:
+    if not fields.get("religion"):
         for t in tokens:
-            for rv in RELIGION_VALUES:
-                if normalize_ar(rv) == t.norm_text:
-                    fields["religion"] = t.text.strip()
-                    rules_fired.append("HINT: قيمة ديانة مباشرة من OCR")
-                    break
+            r = _match_known_value(t.text, RELIGION_VALUES)
+            if r:
+                fields["religion"] = r
+                rules_fired.append("HINT: ديانة")
+                break
 
     return fields, decoded, rules_fired
 
@@ -1156,20 +1702,17 @@ class EgyptianIdExtractor:
         card: np.ndarray,
         *,
         enhance_handwriting: bool,
+        face_box: tuple[float, float, float, float] | None = None,
     ) -> list[OcrToken]:
+        _ = face_box  # reserved: zones removed (they fragmented Arabic lines)
         h, w = card.shape[:2]
         blocks_a = engine.ocr_bgr(card, enhance=False)
-        tokens_a = blocks_to_tokens(blocks_a, width=w, height=h)
-
-        enhanced = enhance_id_card(card)
-        blocks_b = engine.ocr_bgr(enhanced, enhance=False)
-        tokens_b = blocks_to_tokens(blocks_b, width=w, height=h)
-
-        tokens = merge_token_lists(tokens_a, tokens_b)
+        tokens = blocks_to_tokens(blocks_a, width=w, height=h)
 
         # Extra ROI OCR for bottom strip (national ID) — often missed
-        y0, y1 = int(h * 0.70), h
-        strip = card[y0:y1, :]
+        nx0, ny0, nx1, ny1 = ID_ZONES["front"]["national_id"]
+        y0, y1 = int(h * ny0), int(h * ny1)
+        strip = card[y0:y1, int(w * nx0) : int(w * nx1)]
         if strip.size:
             strip_big = cv2.resize(strip, None, fx=1.6, fy=1.6, interpolation=cv2.INTER_CUBIC)
             blocks_c = engine.ocr_bgr(strip_big, enhance=enhance_handwriting)
@@ -1185,25 +1728,15 @@ class EgyptianIdExtractor:
                         index=1000 + i,
                         text=text,
                         score=float(b.score or 0),
-                        x0=b.x0 / max(sw, 1),
-                        y0=0.70 + (b.y0 / max(sh, 1)) * 0.30,
-                        x1=b.x1 / max(sw, 1),
-                        y1=0.70 + (b.y1 / max(sh, 1)) * 0.30,
+                        x0=nx0 + (b.x0 / max(sw, 1)) * (nx1 - nx0),
+                        y0=ny0 + (b.y0 / max(sh, 1)) * (ny1 - ny0),
+                        x1=nx0 + (b.x1 / max(sw, 1)) * (nx1 - nx0),
+                        y1=ny0 + (b.y1 / max(sh, 1)) * (ny1 - ny0),
                     )
                 )
             tokens = merge_token_lists(tokens, tokens_c)
 
-        # Name zone ROI (left of photo) — Egyptian ID: 2 name lines
-        tokens = merge_token_lists(
-            tokens,
-            self._zone_tokens(engine, card, 0.12, 0.50, 0.0, 0.70, index_base=2000),
-        )
-        # Address zone ROI — Egyptian ID: 2 address lines under name
-        tokens = merge_token_lists(
-            tokens,
-            self._zone_tokens(engine, card, 0.45, 0.78, 0.0, 0.72, index_base=3000),
-        )
-
+        # Name/address come from the full-card pass (zones fragmented Arabic lines).
         return tokens
 
     @staticmethod
@@ -1254,9 +1787,13 @@ class EgyptianIdExtractor:
         y1r: float,
         x0r: float,
         x1r: float,
+        *,
+        scale: float = 1.8,
     ) -> list[str]:
-        toks = self._zone_tokens(engine, card, y0r, y1r, x0r, x1r, index_base=0)
-        lines = _cluster_tokens_into_lines(toks, y_thresh=0.06)
+        toks = self._zone_tokens(
+            engine, card, y0r, y1r, x0r, x1r, index_base=0, scale=scale
+        )
+        lines = _cluster_tokens_into_lines(toks, y_thresh=0.07)
         out: list[str] = []
         for ln in lines:
             text = _merge_line_scraps(_line_text(ln))
@@ -1288,53 +1825,82 @@ class EgyptianIdExtractor:
                 logger.debug("warp failed", exc_info=True)
                 card = original
 
+        # PaddleOCR can AV-crash on very large ID photos on some Windows setups;
+        # keep a display card, OCR a capped working copy.
+        ocr_card = card
+        ch, cw = card.shape[:2]
+        # ~1000px keeps Arabic lines intact; larger often fragments words.
+        max_side = 1000
+        if max(ch, cw) > max_side:
+            scale = max_side / max(ch, cw)
+            ocr_card = cv2.resize(
+                card,
+                (int(cw * scale), int(ch * scale)),
+                interpolation=cv2.INTER_AREA,
+            )
+
+        face_box = face_box_norm(ocr_card)
         engine = ArabicOcrEngine.get()
         tokens = self._ocr_card_passes(
-            engine, card, enhance_handwriting=enhance_handwriting
+            engine,
+            ocr_card,
+            enhance_handwriting=enhance_handwriting,
+            face_box=face_box,
         )
 
         side = guess_side(tokens)
-        fields, decoded, rules = apply_field_rules(tokens, side)
+        fields, decoded, rules = apply_field_rules(
+            tokens, side, face_box=face_box if side != "back" else None
+        )
 
-        # Prefer dedicated zone OCR (matches real card: 2 name lines + 2 address lines)
+        # FRONT: force name/address from exact ID_ZONES crops
         if side != "back":
-            name_zone = self._zone_lines(engine, card, 0.14, 0.48, 0.0, 0.70)
-            addr_zone = self._zone_lines(engine, card, 0.48, 0.78, 0.0, 0.72)
-            name_zone = [
-                ln
-                for ln in name_zone
-                if not _is_header_noise(ln)
-                and not _is_address_label(ln)
-                and len(_digit_soup(ln)) < 8
-            ]
-            addr_zone = [
-                _merge_line_scraps(_strip_address_label_prefix(ln))
-                for ln in addr_zone
-                if not (
-                    _is_address_label(ln)
-                    and len(_strip_address_label_prefix(ln)) < 3
-                )
-            ]
-            addr_zone = [ln for ln in addr_zone if ln]
+            z_name, z_addr, z_notes = pick_best_front_zones(
+                engine, ocr_card, self._zone_lines, face_box=face_box
+            )
+            rules.extend(z_notes)
+            if z_name:
+                fields["full_name"] = z_name
+                rules.append("ZONE_EXACT: الاسم من منطقة name في ID_ZONES")
+            if z_addr:
+                fields["address"] = z_addr
+                rules.append("ZONE_EXACT: العنوان من منطقة address في ID_ZONES")
 
-            if len(name_zone) >= 2:
-                fields["full_name"] = " ".join(name_zone[:2])
-                rules.append("ZONE2: الاسم من منطقتين (سطرين)")
-            elif len(name_zone) == 1 and (
-                not fields.get("full_name")
-                or len(name_zone[0]) >= len(str(fields.get("full_name") or ""))
-            ):
-                # keep clustered full name if longer; else zone
-                if not fields.get("full_name"):
-                    fields["full_name"] = name_zone[0]
-                    rules.append("ZONE2: سطر اسم واحد من المنطقة")
-
-            if len(addr_zone) >= 2:
-                fields["address"] = " ".join(addr_zone[:2])
-                rules.append("ZONE2: العنوان سطرين من منطقة محل الإقامة")
-            elif len(addr_zone) == 1 and not fields.get("address"):
-                fields["address"] = addr_zone[0]
-                rules.append("ZONE2: سطر عنوان من المنطقة")
+        # Back-side dedicated zones (job / status / expiry) — above barcode
+        if side == "back":
+            jx0, jy0, jx1, jy1 = ID_ZONES["back"]["job"]
+            sx0, sy0, sx1, sy1 = ID_ZONES["back"]["status"]
+            ex0, ey0, ex1, ey1 = ID_ZONES["back"]["expiry"]
+            job_zone = self._zone_lines(engine, ocr_card, jy0, jy1, jx0, jx1)
+            status_zone = self._zone_lines(engine, ocr_card, sy0, sy1, sx0, sx1)
+            expiry_zone = self._zone_lines(engine, ocr_card, ey0, ey1, ex0, ex1)
+            # Re-parse with zone-focused tokens merged
+            zone_toks = merge_token_lists(
+                tokens,
+                self._zone_tokens(engine, ocr_card, jy0, jy1, jx0, jx1, index_base=4000),
+                self._zone_tokens(engine, ocr_card, sy0, sy1, sx0, sx1, index_base=5000),
+                self._zone_tokens(engine, ocr_card, ey0, ey1, ex0, ex1, index_base=6000),
+            )
+            back2, notes2 = extract_back_fields(zone_toks)
+            for k, v in back2.items():
+                if v and (not fields.get(k) or k in {"job", "expiry_date", "marital_status", "religion"}):
+                    if k == "gender" and fields.get("gender"):
+                        continue
+                    if k == "national_id" and fields.get("national_id"):
+                        continue
+                    fields[k] = v
+            rules.extend(notes2)
+            rules.append("ZONE_BACK: قراءة مناطق الظهر (مهنة/حالة/سريان)")
+            # Prefer clearest job line from job_zone
+            for ln in job_zone:
+                n = normalize_ar(ln)
+                if any(normalize_ar(h) in n for h in JOB_HINTS) and len(ln) >= 8:
+                    fields["job"] = ln
+                    break
+            if not fields.get("expiry_date"):
+                exp = extract_expiry_date(expiry_zone + status_zone)
+                if exp:
+                    fields["expiry_date"] = exp
 
         ocr_list = [
             {
@@ -1507,6 +2073,7 @@ def build_field_crops(
         "marital_status",
         "gender",
         "husband_name",
+        "expiry_date",
     ]
     regions: dict[str, list[OcrToken]] = {}
     crops: dict[str, str] = {}
