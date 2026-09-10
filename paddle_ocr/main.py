@@ -138,6 +138,7 @@ async def health() -> dict[str, str]:
 async def ocr_egyptian_id(
     file: UploadFile = File(...),
     enhance_handwriting: str = Form(default="0"),
+    side: str = Form(default="auto"),
 ) -> JSONResponse:
     content = await file.read()
     if not file.filename:
@@ -157,6 +158,13 @@ async def ocr_egyptian_id(
     if not content:
         raise HTTPException(status_code=400, detail="الملف فارغ.")
 
+    side_norm = (side or "auto").strip().lower()
+    if side_norm not in {"auto", "front", "back"}:
+        raise HTTPException(
+            status_code=400,
+            detail="قيمة side يجب أن تكون auto أو front أو back.",
+        )
+
     handwriting = _parse_bool_flag(enhance_handwriting)
     job_id = uuid.uuid4().hex
     work_dir = Path(tempfile.mkdtemp(prefix=f"id_{job_id}_", dir=UPLOAD_DIR))
@@ -166,18 +174,21 @@ async def ocr_egyptian_id(
         ensure_yunet_model()
         input_path.write_bytes(content)
         logger.info(
-            "Egyptian ID OCR: %s (%.2f MB) handwriting=%s",
+            "Egyptian ID OCR: %s (%.2f MB) handwriting=%s side=%s",
             file.filename,
             size_mb,
             handwriting,
+            side_norm,
         )
         result = id_extractor.process_image_path(
             input_path,
             enhance_handwriting=handwriting,
+            forced_side=None if side_norm == "auto" else side_norm,
         )
         payload = result.to_dict()
         payload["ok"] = True
         payload["filename"] = file.filename
+        payload["forced_side"] = side_norm
         return JSONResponse(payload)
     except HTTPException:
         raise

@@ -43,10 +43,10 @@ ID_ZONES: dict[str, dict[str, tuple[float, float, float, float]]] = {
         "face": (0.02, 0.08, 0.30, 0.58),
         # الهيدر الأخضر
         "header": (0.38, 0.02, 0.96, 0.22),
-        # الاسم سطرين (محمد + باقي الاسم)
-        "name": (0.48, 0.23, 0.97, 0.43),
-        # العنوان سطرين (سمادون + مركز …)
-        "address": (0.52, 0.43, 0.97, 0.64),
+        # الاسم سطرين — يغطي تخطيط البطاقة القديمة والجديدة
+        "name": (0.42, 0.22, 0.98, 0.46),
+        # العنوان سطرين تحت الاسم مباشرة
+        "address": (0.45, 0.44, 0.98, 0.66),
         # الرقم القومي
         "national_id": (0.38, 0.70, 0.97, 0.86),
         # رقم المصنع
@@ -989,20 +989,127 @@ def find_national_id_from_tokens(tokens: list[OcrToken]) -> str | None:
     return best if best_score >= 3 else best
 
 
+def _has_ocr_garbage(text: str) -> bool:
+    """Detect corrupted OCR (random diacritics / latin scraps on Arabic ID print)."""
+    raw = text or ""
+    if not raw:
+        return True
+    harakat = sum(1 for c in raw if "\u064b" <= c <= "\u0652")
+    letters = sum(1 for c in raw if ("\u0600" <= c <= "\u06FF") or c.isalpha())
+    if harakat >= 2 and letters > 0 and harakat / letters >= 0.18:
+        return True
+    latin = sum(1 for c in raw if ("a" <= c.lower() <= "z"))
+    if latin >= 2 and _arabic_ratio(raw) < 0.85:
+        return True
+    # Corrupted republic/title scraps
+    n = normalize_ar(raw)
+    if any(x in n for x in ("حرب", "ينمص", "حمه", "الحبيه", "العبيه", "موري", "حرهو")):
+        if len(n.split()) <= 4 and not _is_strong_address_start(raw):
+            return True
+    # Lone weird 2-word scraps with no common name particle
+    words = [w for w in n.split() if w]
+    if len(words) == 2 and all(len(w) <= 6 for w in words):
+        if harakat >= 1 and not _looks_like_address(raw):
+            # Likely title garbage like "فص الحبية"
+            if not any(w in _COMMON_FIRST_NAMES for w in words):
+                return True
+    return False
+
+
+# Frequent Egyptian first names — used to keep real short name lines
+_COMMON_FIRST_NAMES = {
+    normalize_ar(x)
+    for x in (
+        "محمد", "محمود", "احمد", "أحمد", "مصطفى", "مصطفي", "علي", "على",
+        "حسن", "حسين", "ابراهيم", "إبراهيم", "يوسف", "يوسف", "خالد", "عمر",
+        "ياسر", "طارق", "سامي", "سامى", "سعيد", "عبدالله", "عبدالله",
+        "فاطمه", "فاطمة", "عائشه", "عائشة", "مريم", "نور", "هدى", "هدي",
+        "ايه", "آية", "سارة", "ساره", "نورا", "دينا", "منى", "مني",
+    )
+}
+
+
+def _header_bottom_y(tokens: list[OcrToken]) -> float:
+    """Lowest edge of header/title tokens — name starts below this."""
+    bottoms: list[float] = []
+    for t in tokens:
+        n = normalize_ar(t.text)
+        if not n:
+            continue
+        if _is_header_noise(t.text) or "بطاق" in n or "جمهور" in n or "وزاره" in n:
+            bottoms.append(t.y1)
+            continue
+        if _has_ocr_garbage(t.text) and t.cy < 0.35:
+            bottoms.append(t.y1)
+    return max(bottoms) if bottoms else 0.18
+
+
+def _strip_embedded_header(text: str) -> str:
+    """Remove header phrases glued onto a real name/address line by OCR."""
+    out = re.sub(r"\s+", " ", (text or "").strip())
+    if not out:
+        return out
+    phrases = (
+        "بطاقة تحقيق الشخصية",
+        "بطاقه تحقيق الشخصيه",
+        "جمهورية مصر العربية",
+        "جمهوريه مصر العربيه",
+        "وزارة الداخلية",
+        "وزاره الداخليه",
+    )
+    for phr in phrases:
+        out = out.replace(phr, " ")
+    # Drop individual header words when the line mixed name + title
+    header_words = {
+        normalize_ar(w)
+        for phr in phrases
+        for w in phr.split()
+    }
+    n_all = normalize_ar(out)
+    if any(normalize_ar(p) in n_all or any(hw in n_all for hw in ("بطاق", "جمهور", "تحقيق", "شخصيه", "شخصية")) for p in phrases):
+        kept = [
+            w
+            for w in out.split()
+            if normalize_ar(w) not in header_words
+            and "بطاق" not in normalize_ar(w)
+            and "جمهور" not in normalize_ar(w)
+            and "تحقيق" not in normalize_ar(w)
+            and normalize_ar(w) not in {"مصر", "العربيه", "العربية", "الداخليه", "الداخلية", "وزاره", "وزارة"}
+        ]
+        out = " ".join(kept)
+    return re.sub(r"\s+", " ", out).strip(" -–=:،,")
+
+
 def _is_header_noise(text: str) -> bool:
-    n = normalize_ar(text)
-    if not n or len(n) < 2:
+    raw = (text or "").strip()
+    if not raw:
+        return True
+    stripped = _strip_embedded_header(raw)
+    n_raw = normalize_ar(raw)
+    n_strip = normalize_ar(stripped)
+
+    # Mixed OCR: "محمود بطاقة تحقيق الشخصية" → keep as usable after strip
+    if stripped and n_strip and n_strip != n_raw:
+        if "بطاق" not in n_strip and "جمهور" not in n_strip and len(n_strip) >= 2:
+            return False
+
+    n = n_raw
+    if len(n) < 2:
         return True
     for h in HEADER_NOISE:
-        if normalize_ar(h) == n or normalize_ar(h) in n and len(n) <= len(normalize_ar(h)) + 2:
+        hn = normalize_ar(h)
+        if hn == n or (hn in n and len(n) <= len(hn) + 2):
             return True
     if any(k in n for k in ("جمهوريه مصر", "بطاقه تحقيق", "وزاره الداخليه")):
         return True
-    # OCR scraps of the republic / ID title line
-    if n.startswith("جمهور") or "جمهور" in n:
+    if n.startswith("جمهور"):
+        return True
+    if "جمهور" in n and len(n.split()) <= 5 and not stripped:
         return True
     if "بطاق" in n and ("شخص" in n or "تحقيق" in n):
-        return True
+        if not stripped or "بطاق" in n_strip or "شخص" in n_strip or "تحقيق" in n_strip:
+            return True
+        return False
     if "وزاره" in n or "داخليه" in n:
         return True
     return False
@@ -1113,6 +1220,8 @@ ADDRESS_PLACE_WORDS = {
         "الإسكندرية",
         "المنصوره",
         "المنصورة",
+        "المنوفيه",
+        "المنوفية",
         "الشرقيه",
         "الشرقية",
         "الغربيه",
@@ -1121,6 +1230,10 @@ ADDRESS_PLACE_WORDS = {
         "الدقهلية",
         "القليوبيه",
         "القليوبية",
+        "اشمون",
+        "أشمون",
+        "الحكماء",
+        "الحكما",
         "ثان",
         "اول",
         "أول",
@@ -1197,6 +1310,8 @@ def _looks_like_person_name(text: str) -> bool:
     raw = (text or "").strip()
     n = normalize_ar(raw)
     if len(n) < 2 or len(n) > 45:
+        return False
+    if _has_ocr_garbage(raw):
         return False
     if _is_header_noise(raw) or _is_name_stop_label(raw):
         return False
@@ -1354,6 +1469,8 @@ def _merge_line_scraps(text: str) -> str:
 def _score_name_line(text: str, cy: float) -> float:
     if not text or _is_header_noise(text) or _is_address_label(text):
         return -10.0
+    if _has_ocr_garbage(text):
+        return -8.0
     if _is_strong_address_start(text) or (
         _looks_like_address(text) and not _looks_like_person_name(text)
     ):
@@ -1468,10 +1585,10 @@ def extract_name_and_address(
         cy = sum(t.cy for t in ln) / len(ln)
         if len(_digit_soup(raw)) >= 10 and _arabic_ratio(raw) < 0.35:
             continue
-        if _is_header_noise(raw):
+        if _is_header_noise(raw) or _has_ocr_garbage(raw):
             continue
-        text = _merge_line_scraps(raw)
-        if not text:
+        text = _merge_line_scraps(_strip_embedded_header(raw))
+        if not text or _has_ocr_garbage(text):
             continue
         line_meta.append((cy, text, ln))
 
@@ -1492,34 +1609,76 @@ def extract_name_and_address(
             }
         )
 
-    # Prefer vertical order: first name-like pair, then address-like pair
+    # Prefer the classic Egyptian ID pattern:
+    #   L1 short first name, L2 remaining 3–5 name words (highest signal)
     name_idxs: list[int] = []
+    best_main = -1
+    best_main_score = -1.0
     for i, row in enumerate(scored):
-        if row["cy"] < 0.10:
+        if row["cy"] < 0.12 or row["cy"] > 0.55:
             continue
-        if row["name_s"] >= 3.0 and row["name_s"] > row["addr_s"]:
-            name_idxs.append(i)
-            if i + 1 < len(scored):
-                nxt = scored[i + 1]
-                if (
-                    nxt["name_s"] >= 2.0
-                    and nxt["name_s"] >= nxt["addr_s"]
-                    and not _is_strong_address_start(nxt["text"])
-                    and not _is_address_label(nxt["text"])
-                ):
-                    name_idxs.append(i + 1)
-            break
+        words = [w for w in normalize_ar(row["text"]).split() if w]
+        if len(words) < 3:
+            continue
+        if row["name_s"] < 3.0 or row["name_s"] <= row["addr_s"]:
+            continue
+        if _has_ocr_garbage(row["text"]) or _is_strong_address_start(row["text"]):
+            continue
+        # Prefer fuller remaining-name lines
+        s = row["name_s"] + min(len(words), 5) * 0.5
+        if s > best_main_score:
+            best_main_score = s
+            best_main = i
+    if best_main >= 0:
+        name_idxs = [best_main]
+        # Short first-name line directly above
+        if best_main > 0:
+            prev = scored[best_main - 1]
+            pw = [w for w in normalize_ar(prev["text"]).split() if w]
+            if (
+                prev["name_s"] >= 2.0
+                and prev["name_s"] >= prev["addr_s"]
+                and 1 <= len(pw) <= 2
+                and not _has_ocr_garbage(prev["text"])
+                and not _is_strong_address_start(prev["text"])
+            ):
+                name_idxs = [best_main - 1, best_main]
+
+    # Fallback: first contiguous name-like pair in reading order
+    if not name_idxs:
+        for i, row in enumerate(scored):
+            if row["cy"] < 0.10:
+                continue
+            if row["name_s"] >= 3.0 and row["name_s"] > row["addr_s"]:
+                name_idxs.append(i)
+                if i + 1 < len(scored):
+                    nxt = scored[i + 1]
+                    if (
+                        nxt["name_s"] >= 2.0
+                        and nxt["name_s"] >= nxt["addr_s"]
+                        and not _is_strong_address_start(nxt["text"])
+                        and not _is_address_label(nxt["text"])
+                        and not _has_ocr_garbage(nxt["text"])
+                    ):
+                        name_idxs.append(i + 1)
+                break
 
     # If only one name line found, try pull previous short first-name
     if len(name_idxs) == 1 and name_idxs[0] > 0:
         prev = scored[name_idxs[0] - 1]
-        if prev["name_s"] >= 2.5 and len(normalize_ar(prev["text"]).split()) <= 2:
+        if (
+            prev["name_s"] >= 2.5
+            and len(normalize_ar(prev["text"]).split()) <= 2
+            and not _has_ocr_garbage(prev["text"])
+        ):
             name_idxs = [name_idxs[0] - 1, name_idxs[0]]
 
     # If still empty: take the top-most 1–2 Arabic non-address lines
     if not name_idxs:
         for i, row in enumerate(scored):
             if row["cy"] < 0.12 or row["cy"] > 0.55:
+                continue
+            if _has_ocr_garbage(row["text"]):
                 continue
             if row["addr_s"] > row["name_s"] and row["addr_s"] >= 3.0:
                 continue
@@ -1598,6 +1757,9 @@ def extract_name_and_address(
 def _line_quality(text: str, *, kind: str) -> float:
     if not text:
         return -1.0
+    text = _strip_embedded_header(text)
+    if not text:
+        return -1.0
     n = normalize_ar(text)
     words = [w for w in re.split(r"\s+", n) if w]
     score = float(len(n)) * 0.15 + float(len(words))
@@ -1621,6 +1783,10 @@ def _line_quality(text: str, *, kind: str) -> float:
             score += 1.5
         if any(normalize_ar(p) in n for p in ADDRESS_PLACE_WORDS):
             score += 2.0
+        # Penalize latin OCR junk / name bleed
+        latin = sum(1 for c in text if "a" <= c.lower() <= "z")
+        if latin >= 2:
+            score -= 3.0
     return score
 
 
@@ -1628,6 +1794,7 @@ def _lines_from_zone_ocr(raw_lines: list[str], *, kind: str) -> list[str]:
     """Pick up to 2 cleaned lines from a dedicated name/address zone OCR."""
     candidates: list[tuple[float, int, str]] = []
     for i, ln in enumerate(raw_lines):
+        ln = _strip_embedded_header(ln)
         if kind == "name":
             if _is_header_noise(ln) or _is_address_label(ln):
                 continue
@@ -1638,7 +1805,12 @@ def _lines_from_zone_ocr(raw_lines: list[str], *, kind: str) -> list[str]:
             cleaned = _merge_line_scraps(ln)
             if not cleaned or len(normalize_ar(cleaned)) < 2:
                 continue
+            if _has_ocr_garbage(cleaned):
+                continue
             if _arabic_ratio(cleaned) < 0.55:
+                continue
+            # Name lines must look like a person name (drop header scraps)
+            if not _looks_like_person_name(cleaned) and len(normalize_ar(cleaned).split()) > 2:
                 continue
             candidates.append((_line_quality(cleaned, kind="name"), i, cleaned))
         else:
@@ -1668,32 +1840,230 @@ def _lines_from_zone_ocr(raw_lines: list[str], *, kind: str) -> list[str]:
     return out[:2]
 
 
+def _tokens_in_box(
+    tokens: list[OcrToken],
+    box: tuple[float, float, float, float],
+    *,
+    pad: float = 0.02,
+) -> list[OcrToken]:
+    x0, y0, x1, y1 = pad_zone(box, pad)
+    out: list[OcrToken] = []
+    for t in tokens:
+        # Prefer tokens whose center is inside; allow slight edge bleed
+        if y0 <= t.cy <= y1 and x0 <= t.cx <= x1:
+            out.append(t)
+            continue
+        # Also keep short tokens mostly overlapping the box (first name far right)
+        overlap_x = max(0.0, min(t.x1, x1) - max(t.x0, x0))
+        overlap_y = max(0.0, min(t.y1, y1) - max(t.y0, y0))
+        tw = max(t.x1 - t.x0, 1e-6)
+        th = max(t.y1 - t.y0, 1e-6)
+        if (overlap_x / tw) >= 0.55 and (overlap_y / th) >= 0.45 and t.cx >= x0 - 0.05:
+            out.append(t)
+    return out
+
+
+def _lines_from_tokens_in_box(
+    tokens: list[OcrToken],
+    box: tuple[float, float, float, float],
+    *,
+    kind: str,
+    pad: float = 0.02,
+) -> list[str]:
+    """Build cleaned lines from full-card tokens that fall inside a layout zone."""
+    x0, y0, x1, y1 = box
+    if kind == "name":
+        # Never read above the printed header/title band
+        y0 = max(y0, _header_bottom_y(tokens) + 0.01)
+    zone_toks = _tokens_in_box(tokens, (x0, y0, x1, y1), pad=pad)
+    if not zone_toks:
+        return []
+    clustered = _cluster_tokens_into_lines(zone_toks, y_thresh=0.04)
+    raw: list[str] = []
+    for ln in clustered:
+        text = _merge_line_scraps(_strip_embedded_header(_line_text(ln)))
+        if not text:
+            continue
+        if kind == "name" and (_has_ocr_garbage(text) or _is_header_noise(text)):
+            continue
+        raw.append(text)
+    return _lines_from_zone_ocr(raw, kind=kind)
+
+
+def _join_field_lines(lines: list[str] | None) -> str | None:
+    if not lines:
+        return None
+    text = " ".join(x.strip() for x in lines if x and x.strip()).strip()
+    return text or None
+
+
+def _name_field_score(text: str | None) -> float:
+    if not text:
+        return -1.0
+    text = _strip_embedded_header(text)
+    words = [w for w in re.split(r"\s+", normalize_ar(text)) if w]
+    if not words:
+        return -1.0
+    score = 0.0
+    # Ideal Egyptian ID: short first name + longer remainder (3–5 words total min)
+    if 2 <= len(words) <= 8:
+        score += 3.0
+    if len(words) >= 3:
+        score += 2.0
+    if _looks_like_person_name(text) or all(
+        _looks_like_person_name(w) or len(w) >= 2 for w in words[:2]
+    ):
+        score += 3.0
+    if _is_strong_address_start(text) or _looks_like_address(text):
+        score -= 4.0
+    if _is_header_noise(text):
+        score -= 5.0
+    score += min(len(words), 6) * 0.6
+    score += _arabic_ratio(text) * 2.0
+    return score
+
+
+def _address_field_score(text: str | None) -> float:
+    if not text:
+        return -1.0
+    n = normalize_ar(text)
+    words = [w for w in re.split(r"\s+", n) if w]
+    score = 0.0
+    if _looks_like_address(text) or _is_strong_address_start(text):
+        score += 4.0
+    if any(normalize_ar(p) in n for p in ADDRESS_PLACE_WORDS):
+        score += 3.0
+    if any(h in n for h in ("شارع", "مركز", "قسم", "قريه", "قرية", "ش ")):
+        score += 2.0
+    if "-" in text or "–" in text:
+        score += 1.0
+    # Prefer 2 logical chunks
+    if 2 <= len(words) <= 12:
+        score += 2.0
+    latin = sum(1 for c in text if "a" <= c.lower() <= "z")
+    if latin >= 2:
+        score -= 4.0
+    # Scrambled zone OCR often dumps too many words
+    if len(words) > 12:
+        score -= 3.0
+    score += _arabic_ratio(text) * 1.5
+    return score
+
+
+def _choose_better_field(
+    a: str | None,
+    b: str | None,
+    *,
+    kind: str,
+) -> str | None:
+    if not a:
+        return b
+    if not b:
+        return a
+    if kind == "name":
+        sa, sb = _name_field_score(a), _name_field_score(b)
+    else:
+        sa, sb = _address_field_score(a), _address_field_score(b)
+    # Prefer more complete when scores close
+    if abs(sa - sb) < 0.8:
+        wa = len(normalize_ar(a).split())
+        wb = len(normalize_ar(b).split())
+        # Prefer fuller text for both name and address
+        return a if wa >= wb else b
+    return a if sa >= sb else b
+
+
+def _scrub_name_bleed_from_address(address: str | None, name: str | None) -> str | None:
+    if not address or not name:
+        return address
+    name_words = {normalize_ar(w) for w in name.split() if len(normalize_ar(w)) >= 3}
+    if not name_words:
+        return address
+    kept: list[str] = []
+    for w in address.split():
+        nw = normalize_ar(w)
+        if nw in name_words and not _looks_like_address(w) and nw not in ADDRESS_PLACE_WORDS:
+            # Keep street numbers / place words even if overlapping a name token like محمد
+            if nw in {"محمد", "احمد", "أحمد", "علي", "على", "حسن", "حسين"}:
+                # Common name parts that also appear in street names — keep if neighbors look like address
+                kept.append(w)
+                continue
+            continue
+        kept.append(w)
+    out = " ".join(kept).strip()
+    return out or address
+
+
 def pick_best_front_zones(
     engine: Any,
     card: np.ndarray,
     zone_lines_fn: Any,
     *,
     face_box: tuple[float, float, float, float] | None = None,
+    tokens: list[OcrToken] | None = None,
 ) -> tuple[str | None, str | None, list[str]]:
-    """OCR ID_ZONES name/address (slight pad for reading; display boxes stay exact)."""
+    """Name/address from full-card tokens inside ID_ZONES; crop OCR only as fallback.
+
+    Cropping zones and re-OCR often fragments Arabic lines; the full-card pass is
+    usually cleaner. Zone boxes only select which tokens belong to each field.
+    """
     _ = face_box
     notes: list[str] = []
-    nx0, ny0, nx1, ny1 = pad_zone(ID_ZONES["front"]["name"], 0.015)
-    ax0, ay0, ax1, ay1 = pad_zone(ID_ZONES["front"]["address"], 0.015)
+    name_box = ID_ZONES["front"]["name"]
+    addr_box = ID_ZONES["front"]["address"]
+    notes.append(f"ZONE_NAME=exact{name_box}")
+    notes.append(f"ZONE_ADDR=exact{addr_box}")
 
-    notes.append(
-        f"ZONE_NAME=exact{ID_ZONES['front']['name']} ocr({nx0:.2f},{ny0:.2f})-({nx1:.2f},{ny1:.2f})"
-    )
-    notes.append(
-        f"ZONE_ADDR=exact{ID_ZONES['front']['address']} ocr({ax0:.2f},{ay0:.2f})-({ax1:.2f},{ay1:.2f})"
-    )
+    name_lines: list[str] = []
+    addr_lines: list[str] = []
+    if tokens:
+        name_lines = _lines_from_tokens_in_box(tokens, name_box, kind="name", pad=0.025)
+        addr_lines = _lines_from_tokens_in_box(tokens, addr_box, kind="address", pad=0.02)
+        if name_lines:
+            notes.append(f"TOK_NAME← {' || '.join(name_lines)}")
+        if addr_lines:
+            notes.append(f"TOK_ADDR← {' || '.join(addr_lines)}")
 
-    # One solid scale keeps Arabic words intact; padding helps edge glyphs
-    name_raw = zone_lines_fn(engine, card, ny0, ny1, nx0, nx1, scale=1.7)
-    addr_raw = zone_lines_fn(engine, card, ay0, ay1, ax0, ax1, scale=1.7)
+    # Crop OCR only to fill missing lines (never primary on Egyptian print)
+    need_name = len(name_lines) < 2
+    need_addr = len(addr_lines) < 2
+    if need_name or need_addr:
+        # Non-overlapping pads: shrink shared border to avoid name↔address bleed
+        nx0, ny0, nx1, ny1 = name_box
+        ax0, ay0, ax1, ay1 = addr_box
+        mid_y = (ny1 + ay0) / 2.0
+        name_ocr_box = (max(0.0, nx0 - 0.01), max(0.0, ny0 - 0.01), min(1.0, nx1 + 0.01), mid_y)
+        addr_ocr_box = (max(0.0, ax0 - 0.01), mid_y, min(1.0, ax1 + 0.01), min(1.0, ay1 + 0.01))
+        if need_name:
+            name_raw = zone_lines_fn(
+                engine, card, name_ocr_box[1], name_ocr_box[3], name_ocr_box[0], name_ocr_box[2], scale=1.7
+            )
+            crop_name = _lines_from_zone_ocr(name_raw, kind="name")
+            if crop_name:
+                notes.append(f"CROP_NAME← {' || '.join(crop_name)}")
+                if _name_field_score(_join_field_lines(crop_name)) > _name_field_score(
+                    _join_field_lines(name_lines)
+                ):
+                    name_lines = crop_name
+                elif len(name_lines) < len(crop_name):
+                    # Merge missing short first name
+                    for ln in crop_name:
+                        if not any(normalize_ar(ln) == normalize_ar(x) for x in name_lines):
+                            if _looks_like_person_name(ln) and len(normalize_ar(ln).split()) <= 2:
+                                name_lines = [ln, *name_lines][:2]
+                                break
+        if need_addr:
+            addr_raw = zone_lines_fn(
+                engine, card, addr_ocr_box[1], addr_ocr_box[3], addr_ocr_box[0], addr_ocr_box[2], scale=1.7
+            )
+            crop_addr = _lines_from_zone_ocr(addr_raw, kind="address")
+            if crop_addr:
+                notes.append(f"CROP_ADDR← {' || '.join(crop_addr)}")
+                if _address_field_score(_join_field_lines(crop_addr)) > _address_field_score(
+                    _join_field_lines(addr_lines)
+                ):
+                    addr_lines = crop_addr
 
-    name_lines = _lines_from_zone_ocr(name_raw, kind="name")
-    addr_lines = _lines_from_zone_ocr(addr_raw, kind="address")
     if name_lines:
         addr_lines = [
             a
@@ -1701,8 +2071,9 @@ def pick_best_front_zones(
             if not any(normalize_ar(a) == normalize_ar(n) for n in name_lines)
         ][:2]
 
-    name = " ".join(name_lines) if name_lines else None
-    addr = " ".join(addr_lines) if addr_lines else None
+    name = _join_field_lines(name_lines)
+    addr = _join_field_lines(addr_lines)
+    addr = _scrub_name_bleed_from_address(addr, name)
     if name:
         notes.append(f"BAND_NAME← {' || '.join(name_lines)}")
     if addr:
@@ -2033,6 +2404,7 @@ class EgyptianIdExtractor:
         image_path: str | Path,
         *,
         enhance_handwriting: bool = False,
+        forced_side: str | None = None,
     ) -> EgyptianIdResult:
         from ocr_engine import ArabicOcrEngine
 
@@ -2078,40 +2450,40 @@ class EgyptianIdExtractor:
             face_box=face_box,
         )
 
-        side = guess_side(tokens, ocr_card)
-        rules_side = [f"SIDE_DETECT: {side}"]
+        if forced_side in {"front", "back"}:
+            side = forced_side
+            rules_side = [f"SIDE_FORCED: {side}"]
+        else:
+            side = guess_side(tokens, ocr_card)
+            rules_side = [f"SIDE_DETECT: {side}"]
         fields, decoded, rules = apply_field_rules(
             tokens, side, face_box=face_box if side != "back" else None
         )
         rules = rules_side + rules
 
-        # FRONT: name/address from layout zones (enhanced card for faint ink)
+        # FRONT: name/address — zone token pick + quality merge (never blind overwrite)
         if side != "back":
+            seq_name = fields.get("full_name")
+            seq_addr = fields.get("address")
             z_name, z_addr, z_notes = pick_best_front_zones(
-                engine, ocr_card_enh, self._zone_lines, face_box=face_box
+                engine,
+                ocr_card_enh,
+                self._zone_lines,
+                face_box=face_box,
+                tokens=tokens,
             )
             rules.extend(z_notes)
-            if z_name:
-                fields["full_name"] = z_name
-                rules.append("ZONE_EXACT: الاسم من منطقة name في ID_ZONES")
-            if z_addr:
-                fields["address"] = z_addr
-                rules.append("ZONE_EXACT: العنوان من منطقة address في ID_ZONES")
 
-            # If enhanced crop missed a field, retry once on raw ocr_card
-            if not fields.get("full_name") or not fields.get("address"):
-                n2, a2, notes2 = pick_best_front_zones(
-                    engine, ocr_card, self._zone_lines, face_box=face_box
-                )
-                rules.extend(notes2)
-                if n2 and not fields.get("full_name"):
-                    fields["full_name"] = n2
-                if a2 and (
-                    not fields.get("address")
-                    or _line_quality(a2, kind="address")
-                    > _line_quality(str(fields.get("address") or ""), kind="address")
-                ):
-                    fields["address"] = a2
+            best_name = _choose_better_field(seq_name, z_name, kind="name")
+            best_addr = _choose_better_field(seq_addr, z_addr, kind="address")
+            best_addr = _scrub_name_bleed_from_address(best_addr, best_name)
+
+            if best_name:
+                fields["full_name"] = best_name
+                rules.append("ZONE_MERGE: الاسم (تسلسل OCR + مناطق)")
+            if best_addr:
+                fields["address"] = best_addr
+                rules.append("ZONE_MERGE: العنوان (تسلسل OCR + مناطق)")
 
             # Dedicated NID digits pass if missing
             if not fields.get("national_id"):

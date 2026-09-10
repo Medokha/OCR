@@ -1,6 +1,7 @@
 (() => {
   const input = document.getElementById("id-input");
-  const runBtn = document.getElementById("id-run");
+  const runFrontBtn = document.getElementById("id-run-front");
+  const runBackBtn = document.getElementById("id-run-back");
   const fileLabel = document.getElementById("id-file-label");
   const handwritingOpt = document.getElementById("id-handwriting");
   const statusEl = document.getElementById("id-status");
@@ -27,8 +28,8 @@
 
   let selectedFile = null;
   let lastPayload = null;
+  let lastSide = "front";
 
-  // Separate forms — no shared field list between sides
   const FRONT_FIELDS = [
     ["full_name", "الاسم بالكامل"],
     ["national_id", "الرقم القومي"],
@@ -96,7 +97,9 @@
   }
 
   function setBusy(busy) {
-    runBtn.disabled = busy || !selectedFile;
+    const noFile = !selectedFile;
+    runFrontBtn.disabled = busy || noFile;
+    runBackBtn.disabled = busy || noFile;
     input.disabled = busy;
     if (!busy) statusEl.hidden = true;
   }
@@ -116,20 +119,6 @@
       imgEl.hidden = true;
       emptyEl.hidden = false;
     }
-  }
-
-  function detectSide(data) {
-    const side = String(data.side || "").toLowerCase();
-    if (side === "front" || side === "back") return side;
-    const fields = data.fields || {};
-    const cardSide = String(fields.card_side || "");
-    if (cardSide.includes("ظهر")) return "back";
-    if (cardSide.includes("وجه")) return "front";
-    // Heuristic: back-only fields filled without name/address
-    if (fields.job || fields.expiry_date || fields.marital_status) {
-      if (!fields.full_name && !fields.address) return "back";
-    }
-    return "front";
   }
 
   function renderRules(rules, decoded) {
@@ -211,13 +200,12 @@
     }
   }
 
-  function renderBySide(data) {
-    const side = detectSide(data);
+  function renderBySide(data, side) {
     const fields = data.fields || {};
     const images = data.images || {};
     const crops = images.crops || {};
+    lastSide = side;
 
-    // Only show the form matching the detected side — prevents front/back bleed
     formFront.hidden = side !== "front";
     formBack.hidden = side !== "back";
     formFront.classList.toggle("is-active", side === "front");
@@ -228,10 +216,9 @@
       sideBadge.className =
         side === "back" ? "id-side-badge is-back" : "id-side-badge is-front";
       sideBadge.textContent =
-        side === "back" ? "تم التعرف: ظهر البطاقة" : "تم التعرف: وجه البطاقة";
+        side === "back" ? "نموذج الظهر" : "نموذج الوجه";
     }
 
-    // Face photo only relevant on front
     const faceCard = document.querySelector(".face-card");
     if (faceCard) faceCard.hidden = side === "back";
 
@@ -250,41 +237,22 @@
       fieldsFrontEl.innerHTML = "";
       cropsFrontEl.innerHTML = "";
     }
-
-    return side;
   }
 
-  input.addEventListener("change", () => {
-    clearError();
-    resultsEl.hidden = true;
-    const file = input.files && input.files[0];
-    if (!file) {
-      selectedFile = null;
-      runBtn.disabled = true;
-      fileLabel.textContent = "لم يتم اختيار ملف بعد";
-      return;
-    }
-    if (!ALLOWED.has(extOf(file.name))) {
-      selectedFile = null;
-      runBtn.disabled = true;
-      showError("يُقبل صورة فقط (PNG / JPG / WEBP / BMP / TIFF).");
-      return;
-    }
-    selectedFile = file;
-    runBtn.disabled = false;
-    const mb = (file.size / (1024 * 1024)).toFixed(2);
-    fileLabel.textContent = `${file.name} · ${mb} ميجابايت`;
-  });
-
-  runBtn.addEventListener("click", async () => {
+  async function runOcr(side) {
     if (!selectedFile) return;
     clearError();
     resultsEl.hidden = true;
     setBusy(true);
-    setStatus("جاري قص البطاقة وقراءة النصوص والصورة الشخصية…");
+    setStatus(
+      side === "back"
+        ? "جاري قراءة ظهر البطاقة…"
+        : "جاري قراءة وجه البطاقة…"
+    );
 
     const form = new FormData();
     form.append("file", selectedFile);
+    form.append("side", side);
     form.append(
       "enhance_handwriting",
       handwritingOpt && handwritingOpt.checked ? "1" : "0"
@@ -304,11 +272,13 @@
 
       lastPayload = data;
       const images = data.images || {};
-      const side = renderBySide(data);
+      const resolvedSide =
+        data.side === "back" || data.side === "front" ? data.side : side;
+      renderBySide(data, resolvedSide);
       setImage(
         faceImg,
         faceEmpty,
-        side === "front" ? images.face || null : null
+        resolvedSide === "front" ? images.face || null : null
       );
       setImage(cardImg, cardEmpty, images.card || images.original || null);
       setImage(
@@ -321,7 +291,7 @@
       rawEl.textContent = data.raw_text || "(فارغ)";
       resultsEl.hidden = false;
       setStatus(
-        side === "back"
+        resolvedSide === "back"
           ? "اكتمل استخراج الظهر"
           : "اكتمل استخراج الوجه"
       );
@@ -335,11 +305,39 @@
     } finally {
       setBusy(false);
     }
+  }
+
+  input.addEventListener("change", () => {
+    clearError();
+    resultsEl.hidden = true;
+    const file = input.files && input.files[0];
+    if (!file) {
+      selectedFile = null;
+      setBusy(false);
+      fileLabel.textContent = "لم يتم اختيار ملف بعد";
+      return;
+    }
+    if (!ALLOWED.has(extOf(file.name))) {
+      selectedFile = null;
+      setBusy(false);
+      runFrontBtn.disabled = true;
+      runBackBtn.disabled = true;
+      showError("يُقبل صورة فقط (PNG / JPG / WEBP / BMP / TIFF).");
+      return;
+    }
+    selectedFile = file;
+    runFrontBtn.disabled = false;
+    runBackBtn.disabled = false;
+    const mb = (file.size / (1024 * 1024)).toFixed(2);
+    fileLabel.textContent = `${file.name} · ${mb} ميجابايت · اختر: قراءة الوجه أو قراءة الظهر`;
   });
+
+  runFrontBtn.addEventListener("click", () => runOcr("front"));
+  runBackBtn.addEventListener("click", () => runOcr("back"));
 
   copyBtn.addEventListener("click", async () => {
     if (!lastPayload) return;
-    const side = detectSide(lastPayload);
+    const side = lastSide;
     const fields = lastPayload.fields || {};
     const keys =
       side === "back"

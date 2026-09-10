@@ -17,20 +17,23 @@
     <header class="hero id-hero">
       <p class="brand">قراءة</p>
       <h1>بطاقة الرقم القومي المصرية</h1>
-      <p class="lede">ارفع صورة وجه أو ظهر البطاقة — ظهر البطاقة يستخرج المهنة والنوع والديانة والحالة الاجتماعية وتاريخ السريان. الاستخراج محلي بالكامل (PaddleOCR + OpenCV).</p>
+      <p class="lede">ارفع صورة البطاقة، ثم اختر زرار الوجه أو الظهر حسب الصورة. الاستخراج محلي بالكامل (PaddleOCR + OpenCV).</p>
 
       <div class="cta-row">
         <label class="btn-primary" for="id-input">اختر صورة البطاقة</label>
         <input id="id-input" type="file" accept="image/*,.png,.jpg,.jpeg,.webp,.bmp,.tif,.tiff" hidden />
-        <button id="id-run" class="btn-secondary" type="button" disabled>استخراج البيانات</button>
         <a class="btn-ghost" href="/">OCR عام</a>
         <a class="btn-ghost" href="/map">Mapping</a>
+      </div>
+      <div class="cta-row id-side-actions">
+        <button id="id-run-front" class="btn-secondary" type="button" disabled>قراءة الوجه</button>
+        <button id="id-run-back" class="btn-secondary id-btn-back" type="button" disabled>قراءة الظهر</button>
       </div>
       <label class="opt-check" for="id-handwriting">
         <input id="id-handwriting" type="checkbox" />
         <span>تحسين خط اليد / جودة ضعيفة</span>
       </label>
-      <p id="id-file-label" class="file-label">الحد الأقصى {{ max_upload_mb }} ميجابايت · صورة فقط · يُفضّل وجه البطاقة بوضوح</p>
+      <p id="id-file-label" class="file-label">الحد الأقصى {{ max_upload_mb }} ميجابايت · اختر الصورة ثم اضغط زرار الوجه أو الظهر</p>
     </header>
 
     <section id="id-status" class="status" hidden>
