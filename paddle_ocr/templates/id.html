@@ -1,0 +1,101 @@
+<!DOCTYPE html>
+<html lang="ar" dir="rtl">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>بطاقة الرقم القومي — قراءة</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Cairo:wght@400;600;700;800&family=IBM+Plex+Sans+Arabic:wght@400;500;600&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="/static/styles.css" />
+  <link rel="stylesheet" href="/static/id.css" />
+</head>
+<body>
+  <div class="atmosphere" aria-hidden="true"></div>
+
+  <main class="shell id-shell">
+    <header class="hero id-hero">
+      <p class="brand">قراءة</p>
+      <h1>بطاقة الرقم القومي المصرية</h1>
+      <p class="lede">ارفع صورة وجه أو ظهر البطاقة — استخراج محلي بالكامل (PaddleOCR + OpenCV) بدون أي cloud.</p>
+
+      <div class="cta-row">
+        <label class="btn-primary" for="id-input">اختر صورة البطاقة</label>
+        <input id="id-input" type="file" accept="image/*,.png,.jpg,.jpeg,.webp,.bmp,.tif,.tiff" hidden />
+        <button id="id-run" class="btn-secondary" type="button" disabled>استخراج البيانات</button>
+        <a class="btn-ghost" href="/">OCR عام</a>
+        <a class="btn-ghost" href="/map">Mapping</a>
+      </div>
+      <label class="opt-check" for="id-handwriting">
+        <input id="id-handwriting" type="checkbox" />
+        <span>تحسين خط اليد / جودة ضعيفة</span>
+      </label>
+      <p id="id-file-label" class="file-label">الحد الأقصى {{ max_upload_mb }} ميجابايت · صورة فقط · يُفضّل وجه البطاقة بوضوح</p>
+    </header>
+
+    <section id="id-status" class="status" hidden>
+      <div class="spinner" aria-hidden="true"></div>
+      <p id="id-status-text">جاري قراءة البطاقة…</p>
+    </section>
+
+    <section id="id-error" class="error" hidden></section>
+
+    <section id="id-results" class="id-results" hidden>
+      <div class="id-layout">
+        <aside class="id-visuals">
+          <article class="id-photo-card face-card">
+            <h3>الصورة الشخصية</h3>
+            <div class="photo-frame">
+              <img id="face-img" alt="الصورة الشخصية" hidden />
+              <p id="face-empty" class="photo-empty">لم تُستخرج بعد</p>
+            </div>
+          </article>
+          <article class="id-photo-card">
+            <h3>صورة البطاقة مع تحديد الحقول</h3>
+            <div class="photo-frame card-frame">
+              <img id="annotated-img" alt="البطاقة محددة" hidden />
+              <p id="annotated-empty" class="photo-empty">—</p>
+            </div>
+          </article>
+          <article class="id-photo-card">
+            <h3>صورة البطاقة</h3>
+            <div class="photo-frame card-frame">
+              <img id="card-img" alt="البطاقة" hidden />
+              <p id="card-empty" class="photo-empty">—</p>
+            </div>
+          </article>
+        </aside>
+
+        <div class="id-data">
+          <div class="id-data-head">
+            <h2>البيانات المستخرجة</h2>
+            <p id="id-meta" class="meta"></p>
+          </div>
+          <div id="id-fields" class="id-fields-grid"></div>
+
+          <div class="id-crops-box">
+            <h3>مصدر كل حقل من الصورة (وجه / ظهر)</h3>
+            <p class="meta">قصّة المنطقة اللي اتقرأ منها الاسم، العنوان، الرقم القومي، وباقي حقول الظهر</p>
+            <div id="id-crops" class="id-crops-grid"></div>
+          </div>
+
+          <div class="id-rules-box">
+            <h3>القواعد والمعادلات المطبّقة</h3>
+            <ul id="id-rules" class="id-rules"></ul>
+          </div>
+
+          <details class="raw-block">
+            <summary>النص الخام من OCR</summary>
+            <pre id="id-raw" class="output" dir="rtl"></pre>
+          </details>
+          <div class="cta-row" style="margin-top:1rem">
+            <button id="id-copy" class="btn-ghost" type="button">نسخ JSON</button>
+          </div>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <script src="/static/id.js"></script>
+</body>
+</html>

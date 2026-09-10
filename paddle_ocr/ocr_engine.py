@@ -15,6 +15,10 @@ logger = logging.getLogger(__name__)
 BASE_DIR = Path(__file__).resolve().parent
 MODELS_DIR = BASE_DIR / "models"
 
+IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp", ".bmp", ".tif", ".tiff"}
+PDF_EXTENSIONS = {".pdf"}
+SUPPORTED_EXTENSIONS = PDF_EXTENSIONS | IMAGE_EXTENSIONS
+
 
 def _relax_ssl_if_needed() -> None:
     """Corporate proxies often break cert verification for model hosts."""
@@ -162,7 +166,95 @@ class ArabicOcrEngine:
         finally:
             pdf.close()
 
-    def iter_pdf_pages(self, pdf_path: str):
+    def count_document_pages(self, path: str) -> int:
+        ext = Path(path).suffix.lower()
+        if ext in PDF_EXTENSIONS:
+            return self.count_pdf_pages(path)
+        if ext in IMAGE_EXTENSIONS:
+            return 1
+        raise ValueError(f"Unsupported file type: {ext}")
+
+    @staticmethod
+    def _load_image_rgb(image_path: str) -> Any:
+        import cv2
+        import numpy as np
+
+        data = np.fromfile(image_path, dtype=np.uint8)
+        bgr = cv2.imdecode(data, cv2.IMREAD_COLOR)
+        if bgr is None:
+            # Fallback for odd encodings / paths
+            from PIL import Image
+
+            return np.asarray(Image.open(image_path).convert("RGB"))
+        return cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
+
+    @staticmethod
+    def _enhance_handwriting(image: Any) -> Any:
+        """Boost contrast/edges for handwritten ink on forms/scans."""
+        import cv2
+        import numpy as np
+
+        arr = np.asarray(image)
+        if arr.ndim == 2:
+            gray = arr
+        else:
+            gray = cv2.cvtColor(arr, cv2.COLOR_RGB2GRAY)
+
+        # Downscale very large pages before heavy filters (avoids OOM / process kill).
+        h, w = gray.shape[:2]
+        max_side = 2200
+        if max(h, w) > max_side:
+            scale = max_side / float(max(h, w))
+            gray = cv2.resize(
+                gray,
+                (int(w * scale), int(h * scale)),
+                interpolation=cv2.INTER_AREA,
+            )
+
+        # Fast denoise (NlMeans is too heavy on big scans and can crash the server).
+        den = cv2.bilateralFilter(gray, d=5, sigmaColor=40, sigmaSpace=40)
+
+        clahe = cv2.createCLAHE(clipLimit=2.4, tileGridSize=(8, 8))
+        contrast = clahe.apply(den)
+
+        blur = cv2.GaussianBlur(contrast, (0, 0), 1.0)
+        sharp = cv2.addWeighted(contrast, 1.4, blur, -0.4, 0)
+
+        binary = cv2.adaptiveThreshold(
+            sharp,
+            255,
+            cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
+            cv2.THRESH_BINARY,
+            31,
+            11,
+        )
+        mixed = cv2.addWeighted(sharp, 0.55, binary, 0.45, 0)
+        return cv2.cvtColor(mixed, cv2.COLOR_GRAY2RGB)
+
+    def _ocr_numpy(self, image: Any) -> list[TextBlock]:
+        assert self._ocr is not None
+        raw_results = self._ocr.predict(input=image)
+        raw = (raw_results or [None])[0]
+        return self._extract_blocks(raw)
+
+    def ocr_bgr(self, image_bgr: Any, *, enhance: bool = False) -> list[TextBlock]:
+        """Run OCR on an OpenCV BGR image array."""
+        self._ensure_ready()
+        import cv2
+        import numpy as np
+
+        rgb = cv2.cvtColor(np.asarray(image_bgr), cv2.COLOR_BGR2RGB)
+        if enhance:
+            rgb = self._enhance_handwriting(rgb)
+        return self._ocr_numpy(rgb)
+
+    def iter_pdf_pages(
+        self,
+        pdf_path: str,
+        *,
+        enhance_handwriting: bool = False,
+        render_scale: float | None = None,
+    ):
         """Yield OCR results one PDF page at a time."""
         self._ensure_ready()
         assert self._ocr is not None
@@ -170,22 +262,33 @@ class ArabicOcrEngine:
         import numpy as np
         import pypdfium2 as pdfium
 
+        # Handwriting: modest DPI bump + single enhanced pass (dual pass was crashing).
+        if render_scale is None:
+            render_scale = 2.4 if enhance_handwriting else 2.0
+
         pdf = pdfium.PdfDocument(pdf_path)
         try:
             total = len(pdf)
             for index in range(total):
                 page = pdf[index]
                 try:
-                    # ~150 DPI equivalent for readable Arabic text
-                    bitmap = page.render(scale=2.0)
+                    bitmap = page.render(scale=float(render_scale))
                     image = np.asarray(bitmap.to_pil().convert("RGB"))
                 finally:
                     page.close()
 
-                logger.info("OCR page %s/%s", index + 1, total)
-                raw_results = self._ocr.predict(input=image)
-                raw = (raw_results or [None])[0]
-                blocks = self._extract_blocks(raw)
+                logger.info(
+                    "OCR page %s/%s (scale=%.1f handwriting=%s)",
+                    index + 1,
+                    total,
+                    render_scale,
+                    enhance_handwriting,
+                )
+
+                if enhance_handwriting:
+                    image = self._enhance_handwriting(image)
+
+                blocks = self._ocr_numpy(image)
                 lines = [b.text for b in blocks]
                 scores = [b.score for b in blocks]
                 yield PageResult(
@@ -198,8 +301,83 @@ class ArabicOcrEngine:
         finally:
             pdf.close()
 
-    def recognize_pdf(self, pdf_path: str) -> OcrDocumentResult:
-        pages = list(self.iter_pdf_pages(pdf_path))
+    def iter_image(
+        self,
+        image_path: str,
+        *,
+        enhance_handwriting: bool = False,
+    ):
+        """Yield a single-page OCR result from an image file."""
+        self._ensure_ready()
+        image = self._load_image_rgb(image_path)
+        logger.info(
+            "OCR image %s (handwriting=%s)",
+            Path(image_path).name,
+            enhance_handwriting,
+        )
+        if enhance_handwriting:
+            image = self._enhance_handwriting(image)
+        blocks = self._ocr_numpy(image)
+        lines = [b.text for b in blocks]
+        scores = [b.score for b in blocks]
+        yield PageResult(
+            page_index=0,
+            text="\n".join(lines).strip(),
+            lines=lines,
+            scores=scores,
+            blocks=blocks,
+        )
+
+    def iter_document(
+        self,
+        path: str,
+        *,
+        enhance_handwriting: bool = False,
+        render_scale: float | None = None,
+    ):
+        ext = Path(path).suffix.lower()
+        if ext in PDF_EXTENSIONS:
+            yield from self.iter_pdf_pages(
+                path,
+                enhance_handwriting=enhance_handwriting,
+                render_scale=render_scale,
+            )
+            return
+        if ext in IMAGE_EXTENSIONS:
+            yield from self.iter_image(
+                path,
+                enhance_handwriting=enhance_handwriting,
+            )
+            return
+        raise ValueError(f"Unsupported file type: {ext}")
+
+    def recognize_pdf(
+        self,
+        pdf_path: str,
+        *,
+        enhance_handwriting: bool = False,
+        render_scale: float | None = None,
+    ) -> OcrDocumentResult:
+        return self.recognize_document(
+            pdf_path,
+            enhance_handwriting=enhance_handwriting,
+            render_scale=render_scale,
+        )
+
+    def recognize_document(
+        self,
+        path: str,
+        *,
+        enhance_handwriting: bool = False,
+        render_scale: float | None = None,
+    ) -> OcrDocumentResult:
+        pages = list(
+            self.iter_document(
+                path,
+                enhance_handwriting=enhance_handwriting,
+                render_scale=render_scale,
+            )
+        )
         full_parts = []
         for page in pages:
             if not page.text:

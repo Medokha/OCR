@@ -2,6 +2,7 @@
   const input = document.getElementById("pdf-input");
   const runBtn = document.getElementById("run-btn");
   const fileLabel = document.getElementById("file-label");
+  const handwritingOpt = document.getElementById("handwriting-opt");
   const fieldInput = document.getElementById("field-input");
   const addFieldBtn = document.getElementById("add-field-btn");
   const fieldChips = document.getElementById("field-chips");
@@ -292,6 +293,22 @@
     }
   });
 
+  const ALLOWED_EXT = new Set([
+    ".pdf",
+    ".png",
+    ".jpg",
+    ".jpeg",
+    ".webp",
+    ".bmp",
+    ".tif",
+    ".tiff",
+  ]);
+
+  function fileExt(name) {
+    const i = String(name || "").lastIndexOf(".");
+    return i >= 0 ? String(name).slice(i).toLowerCase() : "";
+  }
+
   input.addEventListener("change", () => {
     clearError();
     resultsEl.hidden = true;
@@ -302,10 +319,11 @@
       fileLabel.textContent = "لم يتم اختيار ملف بعد";
       return;
     }
-    if (!file.name.toLowerCase().endsWith(".pdf")) {
+    const ext = fileExt(file.name);
+    if (!ALLOWED_EXT.has(ext)) {
       selectedFile = null;
       runBtn.disabled = true;
-      showError("يُقبل ملف PDF فقط.");
+      showError("يُقبل PDF أو صورة (PNG / JPG / WEBP / BMP / TIFF).");
       return;
     }
     selectedFile = file;
@@ -343,7 +361,11 @@
     const form = new FormData();
     form.append("file", selectedFile);
     form.append("fields", JSON.stringify(requestedFields));
-    lastName = `${selectedFile.name.replace(/\.pdf$/i, "")}-ocr.txt`;
+    form.append(
+      "enhance_handwriting",
+      handwritingOpt && handwritingOpt.checked ? "1" : "0"
+    );
+    lastName = `${selectedFile.name.replace(/\.(pdf|png|jpe?g|webp|bmp|tiff?)$/i, "")}-ocr.txt`;
 
     try {
       const response = await fetch("/api/ocr/stream", {
@@ -377,7 +399,10 @@
 
           const event = JSON.parse(line);
           if (event.type === "start") {
-            setStatus(`بدء القراءة · ${event.page_count} صفحة`);
+            const hw = event.enhance_handwriting
+              ? " · وضع خط اليد"
+              : "";
+            setStatus(`بدء القراءة · ${event.page_count} صفحة${hw}`);
             metaEl.textContent = `${event.filename} · 0 / ${event.page_count}`;
           } else if (event.type === "page") {
             appendPage(event.page);
@@ -399,7 +424,14 @@
         }
       }
     } catch (err) {
-      showError(err.message || "حدث خطأ غير متوقع.");
+      const msg = String(err && err.message ? err.message : err);
+      if (/failed to fetch|networkerror|load failed/i.test(msg)) {
+        showError(
+          "انقطع الاتصال بالسيرفر (غالبًا وقع أثناء القراءة). أعد تشغيل السيرفر ثم حاول مرة أخرى، وجرّب بدون «تحسين خط اليد» لو استمر."
+        );
+      } else {
+        showError(msg || "حدث خطأ غير متوقع.");
+      }
     } finally {
       setBusy(false);
     }

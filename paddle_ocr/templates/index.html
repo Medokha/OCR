@@ -15,8 +15,8 @@
   <main class="shell">
     <header class="hero">
       <p class="brand">قراءة</p>
-      <h1>استخراج النص العربي من ملفات PDF</h1>
-      <p class="lede">اكتب أسماء الحقول كما تظهر في الملف (عربي أو إنجليزي)، ارفع الـ PDF، وسيُبحث عن كل حقل ويُعرض قيمته إن وُجدت.</p>
+      <h1>استخراج النص العربي من PDF والصور</h1>
+      <p class="lede">ارفع ملف PDF أو صورة، وسيُستخرج النص والبيانات حسب الحقول أو الـ Mapping المحفوظ.</p>
 
       <div class="field-builder">
         <label class="field-builder-label" for="field-input">أسماء الحقول المطلوبة</label>
@@ -28,13 +28,18 @@
         <p class="file-label">Zoning: قيمة كل حقل من <strong>يمينه</strong> على نفس الصف (مش تسميات أخرى زي Branch Code).</p>
       </div>
 
-      <div class="cta-row">
-        <label class="btn-primary" for="pdf-input">اختر ملف PDF</label>
-        <input id="pdf-input" type="file" accept="application/pdf,.pdf" hidden />
+        <div class="cta-row">
+        <label class="btn-primary" for="pdf-input">اختر PDF أو صورة</label>
+        <input id="pdf-input" type="file" accept="application/pdf,.pdf,image/*,.png,.jpg,.jpeg,.webp,.bmp,.tif,.tiff" hidden />
         <button id="run-btn" class="btn-secondary" type="button" disabled>ابدأ القراءة</button>
+        <a class="btn-ghost" href="/id">بطاقة الرقم القومي</a>
         <a class="btn-ghost" href="/map" id="open-map-link">شاشة الـ Mapping</a>
       </div>
-      <p id="file-label" class="file-label">الحد الأقصى {{ max_upload_mb }} ميجابايت · PDF فقط · بعد القراءة افتح Mapping لربط name_index بالقيم</p>
+      <label class="opt-check" for="handwriting-opt">
+        <input id="handwriting-opt" type="checkbox" />
+        <span>تحسين خط اليد (أبطأ · دقة أعلى للمكتوب يدوياً)</span>
+      </label>
+      <p id="file-label" class="file-label">الحد الأقصى {{ max_upload_mb }} ميجابايت · PDF أو صورة (PNG/JPG/WEBP…) · بعد القراءة تقدر تفتح Mapping</p>
     </header>
 
     <section id="status" class="status" hidden>

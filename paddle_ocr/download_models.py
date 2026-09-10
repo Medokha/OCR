@@ -75,6 +75,21 @@ def try_bos_tarball(model_name: str) -> Path | None:
     return out
 
 
+def download_yunet() -> Path | None:
+    """OpenCV YuNet face detector (Apache-2.0 / OpenCV Zoo)."""
+    dest = ROOT / "face_detection_yunet_2023mar.onnx"
+    url = (
+        "https://github.com/opencv/opencv_zoo/raw/main/models/"
+        "face_detection_yunet/face_detection_yunet_2023mar.onnx"
+    )
+    try:
+        download_file(url, dest)
+        return dest
+    except Exception as exc:  # noqa: BLE001
+        print(f"YuNet download failed: {exc}")
+        return None
+
+
 def main() -> None:
     ROOT.mkdir(parents=True, exist_ok=True)
     for name in MODELS:
@@ -87,6 +102,12 @@ def main() -> None:
             if path is None:
                 raise SystemExit(f"Could not download {name}")
             print(f"OK BOS -> {path}")
+
+    yunet = download_yunet()
+    if yunet:
+        print(f"OK YuNet face model -> {yunet}")
+    else:
+        print("YuNet missing — Egyptian ID will use Haar cascade fallback")
 
     print("Done. Models are in:", ROOT)
 

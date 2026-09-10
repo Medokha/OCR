@@ -160,6 +160,23 @@ body {
   color: rgba(11, 31, 28, 0.55);
 }
 
+.opt-check {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.55rem;
+  margin-top: 0.85rem;
+  color: var(--ink);
+  font-size: 0.95rem;
+  cursor: pointer;
+  user-select: none;
+}
+
+.opt-check input {
+  width: 1.05rem;
+  height: 1.05rem;
+  accent-color: var(--accent, #1f8a72);
+}
+
 .field-builder {
   margin: 0 0 1.5rem;
   padding: 1rem 1.1rem;

@@ -21,9 +21,15 @@ from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
+from egyptian_id import EgyptianIdExtractor, ensure_yunet_model
 from field_extractor import FieldExtractor
 from mapping_store import apply_mapping, load_mapping, save_mapping
-from ocr_engine import ArabicOcrEngine, PageResult
+from ocr_engine import (
+    PDF_EXTENSIONS,
+    SUPPORTED_EXTENSIONS,
+    ArabicOcrEngine,
+    PageResult,
+)
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 logger = logging.getLogger(__name__)
@@ -38,6 +44,8 @@ templates = Jinja2Templates(directory=str(BASE_DIR / "templates"))
 
 MAX_UPLOAD_MB = 40
 field_extractor = FieldExtractor()
+id_extractor = EgyptianIdExtractor()
+IMAGE_ONLY = {".png", ".jpg", ".jpeg", ".webp", ".bmp", ".tif", ".tiff"}
 
 
 def _page_payload(page: PageResult) -> dict:
@@ -52,11 +60,19 @@ def _page_payload(page: PageResult) -> dict:
     }
 
 
-def _validate_pdf_upload(file: UploadFile, content: bytes) -> None:
+def _file_extension(filename: str | None) -> str:
+    return Path(filename or "").suffix.lower()
+
+
+def _validate_upload(file: UploadFile, content: bytes) -> str:
     if not file.filename:
         raise HTTPException(status_code=400, detail="لم يتم اختيار ملف.")
-    if not file.filename.lower().endswith(".pdf"):
-        raise HTTPException(status_code=400, detail="يُقبل ملف PDF فقط.")
+    ext = _file_extension(file.filename)
+    if ext not in SUPPORTED_EXTENSIONS:
+        raise HTTPException(
+            status_code=400,
+            detail="يُقبل PDF أو صورة (PNG / JPG / WEBP / BMP / TIFF).",
+        )
     size_mb = len(content) / (1024 * 1024)
     if size_mb > MAX_UPLOAD_MB:
         raise HTTPException(
@@ -65,6 +81,13 @@ def _validate_pdf_upload(file: UploadFile, content: bytes) -> None:
         )
     if not content:
         raise HTTPException(status_code=400, detail="الملف فارغ.")
+    return ext
+
+
+def _parse_bool_flag(raw: str | None) -> bool:
+    if raw is None:
+        return False
+    return str(raw).strip().lower() in {"1", "true", "yes", "on", "y"}
 
 
 def _parse_field_labels(raw: str | None) -> list[str]:
@@ -97,9 +120,75 @@ async def mapping_page(request: Request) -> HTMLResponse:
     return templates.TemplateResponse(request, "map.html", {})
 
 
+@app.get("/id", response_class=HTMLResponse)
+async def egyptian_id_page(request: Request) -> HTMLResponse:
+    return templates.TemplateResponse(
+        request,
+        "id.html",
+        {"max_upload_mb": MAX_UPLOAD_MB},
+    )
+
+
 @app.get("/health")
 async def health() -> dict[str, str]:
     return {"status": "ok", "engine": "PaddleOCR", "lang": "ar"}
+
+
+@app.post("/api/id/ocr")
+async def ocr_egyptian_id(
+    file: UploadFile = File(...),
+    enhance_handwriting: str = Form(default="0"),
+) -> JSONResponse:
+    content = await file.read()
+    if not file.filename:
+        raise HTTPException(status_code=400, detail="لم يتم اختيار ملف.")
+    ext = _file_extension(file.filename)
+    if ext not in IMAGE_ONLY:
+        raise HTTPException(
+            status_code=400,
+            detail="ارفع صورة البطاقة (PNG / JPG / WEBP / BMP / TIFF).",
+        )
+    size_mb = len(content) / (1024 * 1024)
+    if size_mb > MAX_UPLOAD_MB:
+        raise HTTPException(
+            status_code=400,
+            detail=f"حجم الملف أكبر من {MAX_UPLOAD_MB} ميجابايت.",
+        )
+    if not content:
+        raise HTTPException(status_code=400, detail="الملف فارغ.")
+
+    handwriting = _parse_bool_flag(enhance_handwriting)
+    job_id = uuid.uuid4().hex
+    work_dir = Path(tempfile.mkdtemp(prefix=f"id_{job_id}_", dir=UPLOAD_DIR))
+    input_path = work_dir / f"card{ext}"
+
+    try:
+        ensure_yunet_model()
+        input_path.write_bytes(content)
+        logger.info(
+            "Egyptian ID OCR: %s (%.2f MB) handwriting=%s",
+            file.filename,
+            size_mb,
+            handwriting,
+        )
+        result = id_extractor.process_image_path(
+            input_path,
+            enhance_handwriting=handwriting,
+        )
+        payload = result.to_dict()
+        payload["ok"] = True
+        payload["filename"] = file.filename
+        return JSONResponse(payload)
+    except HTTPException:
+        raise
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("Egyptian ID OCR failed")
+        raise HTTPException(
+            status_code=500,
+            detail=f"فشل قراءة البطاقة: {exc}",
+        ) from exc
+    finally:
+        shutil.rmtree(work_dir, ignore_errors=True)
 
 
 @app.get("/api/mapping")
@@ -129,27 +218,33 @@ async def post_mapping_apply(request: Request) -> JSONResponse:
 
 
 @app.post("/api/ocr")
-async def ocr_pdf(
+async def ocr_document(
     file: UploadFile = File(...),
     fields: str = Form(default=""),
+    enhance_handwriting: str = Form(default="0"),
 ) -> JSONResponse:
     content = await file.read()
-    _validate_pdf_upload(file, content)
+    ext = _validate_upload(file, content)
     labels = _parse_field_labels(fields)
+    handwriting = _parse_bool_flag(enhance_handwriting)
 
     job_id = uuid.uuid4().hex
     work_dir = Path(tempfile.mkdtemp(prefix=f"ocr_{job_id}_", dir=UPLOAD_DIR))
-    pdf_path = work_dir / "input.pdf"
+    input_path = work_dir / f"input{ext}"
 
     try:
-        pdf_path.write_bytes(content)
+        input_path.write_bytes(content)
         logger.info(
-            "OCR start: %s (%.2f MB) fields=%s",
+            "OCR start: %s (%.2f MB) fields=%s handwriting=%s",
             file.filename,
             len(content) / (1024 * 1024),
             labels,
+            handwriting,
         )
-        result = ArabicOcrEngine.get().recognize_pdf(str(pdf_path))
+        result = ArabicOcrEngine.get().recognize_document(
+            str(input_path),
+            enhance_handwriting=handwriting,
+        )
         pages_payload = [_page_payload(p) for p in result.pages]
         extraction = field_extractor.extract_from_pages(
             [
@@ -191,22 +286,30 @@ async def ocr_pdf(
 
 
 @app.post("/api/ocr/stream")
-async def ocr_pdf_stream(
+async def ocr_document_stream(
     file: UploadFile = File(...),
     fields: str = Form(default=""),
+    enhance_handwriting: str = Form(default="0"),
 ) -> StreamingResponse:
     """Stream OCR page-by-page; extract values for user-entered field labels."""
     content = await file.read()
-    _validate_pdf_upload(file, content)
+    ext = _validate_upload(file, content)
     labels = _parse_field_labels(fields)
+    handwriting = _parse_bool_flag(enhance_handwriting)
 
-    filename = file.filename or "document.pdf"
+    filename = file.filename or f"document{ext}"
     job_id = uuid.uuid4().hex
     work_dir = Path(tempfile.mkdtemp(prefix=f"ocr_{job_id}_", dir=UPLOAD_DIR))
-    pdf_path = work_dir / "input.pdf"
-    pdf_path.write_bytes(content)
+    input_path = work_dir / f"input{ext}"
+    input_path.write_bytes(content)
     size_mb = len(content) / (1024 * 1024)
-    logger.info("OCR stream start: %s (%.2f MB) fields=%s", filename, size_mb, labels)
+    logger.info(
+        "OCR stream start: %s (%.2f MB) fields=%s handwriting=%s",
+        filename,
+        size_mb,
+        labels,
+        handwriting,
+    )
 
     def event_stream():
         engine = ArabicOcrEngine.get()
@@ -214,18 +317,23 @@ async def ocr_pdf_stream(
         line_count = 0
         accumulated_pages: list[dict] = []
         try:
-            total = engine.count_pdf_pages(str(pdf_path))
+            total = engine.count_document_pages(str(input_path))
             yield json.dumps(
                 {
                     "type": "start",
                     "filename": filename,
                     "page_count": total,
                     "requested_fields": labels,
+                    "enhance_handwriting": handwriting,
+                    "kind": "pdf" if ext in PDF_EXTENSIONS else "image",
                 },
                 ensure_ascii=False,
             ) + "\n"
 
-            for page in engine.iter_pdf_pages(str(pdf_path)):
+            for page in engine.iter_document(
+                str(input_path),
+                enhance_handwriting=handwriting,
+            ):
                 pages_done += 1
                 line_count += len(page.lines)
                 accumulated_pages.append(
