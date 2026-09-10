@@ -38,18 +38,19 @@ YUNET_URL = (
 # ---------------------------------------------------------------------------
 ID_ZONES: dict[str, dict[str, tuple[float, float, float, float]]] = {
     "front": {
-        # الصورة الشخصية — يسار الوجه
-        "face": (0.02, 0.08, 0.34, 0.62),
-        # الهيدر الأخضر: جمهورية مصر / بطاقة تحقيق الشخصية
-        "header": (0.34, 0.02, 0.98, 0.22),
-        # الاسم سطرين (يمين) — فوق العنوان
-        "name": (0.34, 0.20, 0.98, 0.44),
-        # العنوان سطرين تحت الاسم
-        "address": (0.34, 0.44, 0.98, 0.70),
-        # الرقم القومي 14 رقم — شريط سفلي يمين
-        "national_id": (0.28, 0.72, 0.98, 0.94),
-        # رقم المصنع اللاتيني أسفل اليسار
-        "serial": (0.02, 0.88, 0.30, 0.99),
+        # مُعايرة من صورة الوجه الفعلية (grid 0.1) — نفس شكل المحدد في front_zones
+        # الصورة الشخصية — يسار
+        "face": (0.02, 0.08, 0.30, 0.58),
+        # الهيدر الأخضر
+        "header": (0.38, 0.02, 0.96, 0.22),
+        # الاسم سطرين (محمد + باقي الاسم)
+        "name": (0.48, 0.23, 0.97, 0.43),
+        # العنوان سطرين (سمادون + مركز …)
+        "address": (0.52, 0.43, 0.97, 0.64),
+        # الرقم القومي
+        "national_id": (0.38, 0.70, 0.97, 0.86),
+        # رقم المصنع
+        "serial": (0.04, 0.87, 0.35, 0.98),
     },
     "back": {
         # المهنة
@@ -155,31 +156,22 @@ _DIGITS_MAP = str.maketrans(
     }
 )
 
-FRONT_HINTS = ("جمهوريه", "جمهورية", "مصر", "العربيه", "العربية", "بطاقه", "بطاقة", "تحقيق", "الشخصيه", "الشخصية", "قومي")
+FRONT_HINTS = (
+    "جمهوريه مصر",
+    "بطاقه تحقيق",
+    "تحقيق الشخصيه",
+    "محل اقامه",
+    "محل الاقامه",
+)
 BACK_HINTS = (
-    "المهنه",
-    "المهنة",
-    "الديانه",
-    "الديانة",
-    "الحاله",
-    "الحالة",
-    "اجتماعيه",
-    "اجتماعية",
-    "الجنس",
-    "ذكر",
-    "انثى",
-    "أنثى",
-    "اعزب",
-    "أعزب",
-    "متزوج",
-    "مسلم",
-    "مسيحي",
-    "ساريه",
-    "سارية",
-    "مهندس",
-    "تخصص",
+    "ساريه حتى",
     "البطاقه ساريه",
-    "البطاقة سارية",
+    "المهنه",
+    "مهنة",
+    "تخصص",
+    "مهندس",
+    "الحاله الاجتماعيه",
+    "الحالة الاجتماعية",
 )
 HEADER_NOISE = (
     "جمهوريه مصر العربيه",
@@ -420,6 +412,73 @@ def enhance_id_card(image_bgr: np.ndarray) -> np.ndarray:
     return sharp
 
 
+def prepare_zone_roi(
+    roi: np.ndarray,
+    *,
+    mode: str = "text",
+    scale: float = 1.8,
+) -> list[np.ndarray]:
+    """Build OCR-ready variants of a layout crop."""
+    if roi is None or not roi.size:
+        return []
+    h, w = roi.shape[:2]
+    target = max(h, w) * scale
+    if target > 900:
+        scale = 900 / max(h, w)
+    scale = max(1.25, min(scale, 2.2))
+    big = cv2.resize(roi, None, fx=scale, fy=scale, interpolation=cv2.INTER_CUBIC)
+    enhanced = enhance_id_card(big)
+    if mode == "digits":
+        gray = cv2.cvtColor(enhanced, cv2.COLOR_BGR2GRAY)
+        gray = cv2.GaussianBlur(gray, (3, 3), 0)
+        thr = cv2.adaptiveThreshold(
+            gray, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY, 31, 8
+        )
+        return [enhanced, cv2.cvtColor(thr, cv2.COLOR_GRAY2BGR)]
+    # Text: enhanced only (raw+enhanced doubled OCR and fragmented Arabic)
+    return [enhanced]
+
+
+def auto_deskew_card(image_bgr: np.ndarray, max_angle: float = 8.0) -> np.ndarray:
+    """Correct small camera tilt; skip large rotations (card already upright)."""
+    try:
+        gray = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2GRAY)
+        gray = cv2.GaussianBlur(gray, (5, 5), 0)
+        edges = cv2.Canny(gray, 50, 150)
+        coords = np.column_stack(np.where(edges > 0))
+        if len(coords) < 200:
+            return image_bgr
+        angle = cv2.minAreaRect(coords)[-1]
+        if angle < -45:
+            angle = 90 + angle
+        if abs(angle) < 0.4 or abs(angle) > max_angle:
+            return image_bgr
+        h, w = image_bgr.shape[:2]
+        m = cv2.getRotationMatrix2D((w / 2, h / 2), angle, 1.0)
+        return cv2.warpAffine(
+            image_bgr,
+            m,
+            (w, h),
+            flags=cv2.INTER_CUBIC,
+            borderMode=cv2.BORDER_REPLICATE,
+        )
+    except Exception:  # noqa: BLE001
+        return image_bgr
+
+
+def pad_zone(
+    box: tuple[float, float, float, float],
+    pad: float = 0.02,
+) -> tuple[float, float, float, float]:
+    x0, y0, x1, y1 = box
+    return (
+        max(0.0, x0 - pad),
+        max(0.0, y0 - pad),
+        min(1.0, x1 + pad),
+        min(1.0, y1 + pad),
+    )
+
+
 def detect_faces(image_bgr: np.ndarray) -> list[tuple[int, int, int, int]]:
     h, w = image_bgr.shape[:2]
     boxes: list[tuple[int, int, int, int]] = []
@@ -498,25 +557,35 @@ def draw_id_zones(
     image_bgr: np.ndarray,
     side: str,
     *,
-    thickness: int = 2,
+    thickness: int = 3,
 ) -> np.ndarray:
-    """Draw labeled ID_ZONES boxes on a copy of the card (no OCR)."""
+    """Draw labeled ID_ZONES boxes — same markers used for OCR crops."""
     out = image_bgr.copy()
     h, w = out.shape[:2]
     zones = ID_ZONES.get(side) or {}
     for name, (x0, y0, x1, y1) in zones.items():
         color = ID_ZONE_COLORS.get(name, (0, 255, 255))
-        p0 = (int(x0 * w), int(y0 * h))
-        p1 = (int(x1 * w), int(y1 * h))
+        p0 = (int(round(x0 * w)), int(round(y0 * h)))
+        p1 = (int(round(x1 * w)), int(round(y1 * h)))
         cv2.rectangle(out, p0, p1, color, thickness)
+        # Filled label bar like the reference overlay
         label = f"{name} ({x0:.2f},{y0:.2f})-({x1:.2f},{y1:.2f})"
+        (tw, th), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.42, 1)
+        ty = max(th + 6, p0[1] + th + 4)
+        cv2.rectangle(
+            out,
+            (p0[0], ty - th - 6),
+            (p0[0] + tw + 8, ty + 4),
+            color,
+            -1,
+        )
         cv2.putText(
             out,
             label,
-            (p0[0] + 4, max(16, p0[1] + 18)),
+            (p0[0] + 4, ty),
             cv2.FONT_HERSHEY_SIMPLEX,
-            0.45,
-            color,
+            0.42,
+            (255, 255, 255),
             1,
             cv2.LINE_AA,
         )
@@ -596,24 +665,116 @@ def merge_token_lists(*lists: list[OcrToken]) -> list[OcrToken]:
     return merged
 
 
-def guess_side(tokens: list[OcrToken]) -> str:
-    blob = normalize_ar(" ".join(t.text for t in tokens))
-    front = sum(1 for h in FRONT_HINTS if h in blob)
-    back = sum(1 for h in BACK_HINTS if h in blob)
-    if any(
-        k in blob
-        for k in ("ساريه حتى", "سارية حتى", "اعزب", "مسلم", "مهندس", "تخصص", "ساريه", "سارية")
-    ):
-        back += 3
-    if any(k in blob for k in ("محل اقامه", "محل الاقامه", "بطاقه تحقيق", "جمهوريه مصر")):
-        front += 2
-    if back > front and back >= 2:
+def _barcode_bottom_score(image_bgr: np.ndarray) -> float:
+    """High score if bottom band looks like a dense 2D barcode (back of ID)."""
+    h, w = image_bgr.shape[:2]
+    if h < 40 or w < 40:
+        return 0.0
+    roi = image_bgr[int(h * 0.55) : int(h * 0.98), int(w * 0.05) : int(w * 0.95)]
+    if roi.size == 0:
+        return 0.0
+    gray = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
+    # Strong local contrast / many black-white transitions → barcode
+    blur = cv2.GaussianBlur(gray, (3, 3), 0)
+    edges = cv2.Canny(blur, 60, 160)
+    edge_ratio = float(np.count_nonzero(edges)) / float(edges.size)
+    # Horizontal projection variance (PDF417 has dense columns)
+    col_std = float(np.std(gray.astype(np.float32), axis=0).mean())
+    score = 0.0
+    if edge_ratio >= 0.12:
+        score += 3.0
+    elif edge_ratio >= 0.07:
+        score += 1.5
+    if col_std >= 35:
+        score += 2.0
+    elif col_std >= 22:
+        score += 1.0
+    return score
+
+
+def _face_left_score(image_bgr: np.ndarray) -> float:
+    """Front of Egyptian ID has the portrait on the left."""
+    h, w = image_bgr.shape[:2]
+    if w <= 0:
+        return 0.0
+    faces = detect_faces(image_bgr)
+    for x, y, bw, bh in faces:
+        cx = (x + bw / 2) / w
+        area = (bw * bh) / float(max(h * w, 1))
+        if cx <= 0.42 and area >= 0.03:
+            return 4.0
+        if cx <= 0.48 and area >= 0.02:
+            return 2.5
+    return 0.0
+
+
+def guess_side(
+    tokens: list[OcrToken],
+    image_bgr: np.ndarray | None = None,
+) -> str:
+    """Decide front vs back using strong unique phrases + visual cues."""
+    texts = [t.text for t in tokens]
+    blob = normalize_ar(" ".join(texts))
+    front = 0.0
+    back = 0.0
+
+    # --- Strong FRONT signals ---
+    if "بطاقه تحقيق" in blob or "تحقيق الشخصيه" in blob:
+        front += 6.0
+    if "جمهوريه مصر" in blob or ("جمهوريه" in blob and "مصر" in blob):
+        front += 4.0
+    if "محل اقامه" in blob or "محل الاقامه" in blob:
+        front += 5.0
+    # 14-digit national ID is on the front (also sometimes printed faintly on back)
+    nid = find_national_id_from_tokens(tokens)
+    if nid and "ساريه" not in blob:
+        front += 2.5
+    elif nid:
+        front += 0.5
+
+    for h in FRONT_HINTS:
+        if normalize_ar(h) in blob:
+            front += 1.0
+
+    # --- Strong BACK signals ---
+    if "ساريه حتى" in blob or ("ساريه" in blob and "حتى" in blob):
+        back += 7.0
+    if "البطاقه ساريه" in blob:
+        back += 5.0
+    # Do NOT treat bare «بطاقه» as front when expiry phrase exists
+    if any(normalize_ar(v) in blob for v in RELIGION_VALUES):
+        back += 2.5
+    if any(normalize_ar(v) in blob for v in MARITAL_VALUES):
+        back += 2.5
+    if "ذكر" in blob or "انثى" in blob:
+        back += 2.0
+    if any(k in blob for k in ("مهندس", "تخصص", "المهنه", "مهنه")):
+        back += 3.0
+    for h in BACK_HINTS:
+        if normalize_ar(h) in blob:
+            back += 1.0
+
+    # --- Visual cues (no OCR) ---
+    if image_bgr is not None and image_bgr.size:
+        face_s = _face_left_score(image_bgr)
+        bar_s = _barcode_bottom_score(image_bgr)
+        front += face_s
+        back += bar_s
+
+    # Decisive thresholds
+    if back >= front + 2 and back >= 4:
         return "back"
-    if front >= 1 or find_national_id_from_tokens(tokens):
-        if back >= 4 and back > front:
-            return "back"
+    if front >= back + 1.5 and front >= 3:
         return "front"
-    if back >= 1:
+    if back > front and back >= 5:
+        return "back"
+    if front > back and front >= 2:
+        return "front"
+    if back >= 4:
+        return "back"
+    if front >= 2 or nid:
+        return "front"
+    if back >= 2:
         return "back"
     return "unknown"
 
@@ -1434,10 +1595,39 @@ def extract_name_and_address(
     return full_name, address, notes
 
 
+def _line_quality(text: str, *, kind: str) -> float:
+    if not text:
+        return -1.0
+    n = normalize_ar(text)
+    words = [w for w in re.split(r"\s+", n) if w]
+    score = float(len(n)) * 0.15 + float(len(words))
+    if kind == "name":
+        if _is_header_noise(text) or _is_strong_address_start(text):
+            return -5.0
+        if _looks_like_person_name(text):
+            score += 4.0
+        if _arabic_ratio(text) >= 0.7:
+            score += 2.0
+        if len(_digit_soup(text)) >= 1:
+            score -= 3.0
+    else:
+        if _is_header_noise(text):
+            return -5.0
+        if _looks_like_address(text) or _is_strong_address_start(text):
+            score += 4.0
+        if "-" in text or "–" in text:
+            score += 1.5
+        if _arabic_ratio(text) >= 0.5:
+            score += 1.5
+        if any(normalize_ar(p) in n for p in ADDRESS_PLACE_WORDS):
+            score += 2.0
+    return score
+
+
 def _lines_from_zone_ocr(raw_lines: list[str], *, kind: str) -> list[str]:
     """Pick up to 2 cleaned lines from a dedicated name/address zone OCR."""
-    out: list[str] = []
-    for ln in raw_lines:
+    candidates: list[tuple[float, int, str]] = []
+    for i, ln in enumerate(raw_lines):
         if kind == "name":
             if _is_header_noise(ln) or _is_address_label(ln):
                 continue
@@ -1450,7 +1640,7 @@ def _lines_from_zone_ocr(raw_lines: list[str], *, kind: str) -> list[str]:
                 continue
             if _arabic_ratio(cleaned) < 0.55:
                 continue
-            out.append(cleaned)
+            candidates.append((_line_quality(cleaned, kind="name"), i, cleaned))
         else:
             if _is_address_label(ln) and len(_strip_address_label_prefix(ln)) < 3:
                 continue
@@ -1461,7 +1651,16 @@ def _lines_from_zone_ocr(raw_lines: list[str], *, kind: str) -> list[str]:
                 continue
             if _arabic_ratio(rest) < 0.35 and not _digit_soup(rest):
                 continue
-            out.append(rest)
+            candidates.append((_line_quality(rest, kind="address"), i, rest))
+
+    # Prefer reading order among good lines (not only top score)
+    good = [c for c in candidates if c[0] >= 1.5] or candidates
+    good.sort(key=lambda x: x[1])
+    out: list[str] = []
+    for _, _, text in good:
+        if any(normalize_ar(text) == normalize_ar(o) for o in out):
+            continue
+        out.append(text)
         if len(out) >= 2:
             break
     if kind == "address":
@@ -1476,26 +1675,25 @@ def pick_best_front_zones(
     *,
     face_box: tuple[float, float, float, float] | None = None,
 ) -> tuple[str | None, str | None, list[str]]:
-    """OCR exactly ID_ZONES['front']['name'] and ['address']; keep 2 lines each."""
+    """OCR ID_ZONES name/address (slight pad for reading; display boxes stay exact)."""
+    _ = face_box
     notes: list[str] = []
-    nx0, ny0, nx1, ny1 = ID_ZONES["front"]["name"]
-    ax0, ay0, ax1, ay1 = ID_ZONES["front"]["address"]
+    nx0, ny0, nx1, ny1 = pad_zone(ID_ZONES["front"]["name"], 0.015)
+    ax0, ay0, ax1, ay1 = pad_zone(ID_ZONES["front"]["address"], 0.015)
 
-    # Text is to the RIGHT of the photo on Egyptian ID front
-    if face_box is not None and face_box[2] < 0.50:
-        nx0 = max(nx0, face_box[2] + 0.01)
-        ax0 = max(ax0, face_box[2] + 0.01)
-        notes.append(f"ZONE_CLIP_LEFT={nx0:.2f}")
+    notes.append(
+        f"ZONE_NAME=exact{ID_ZONES['front']['name']} ocr({nx0:.2f},{ny0:.2f})-({nx1:.2f},{ny1:.2f})"
+    )
+    notes.append(
+        f"ZONE_ADDR=exact{ID_ZONES['front']['address']} ocr({ax0:.2f},{ay0:.2f})-({ax1:.2f},{ay1:.2f})"
+    )
 
-    notes.append(f"ZONE_NAME=({nx0:.2f},{ny0:.2f})-({nx1:.2f},{ny1:.2f})")
-    notes.append(f"ZONE_ADDR=({ax0:.2f},{ay0:.2f})-({ax1:.2f},{ay1:.2f})")
-
-    name_raw = zone_lines_fn(engine, card, ny0, ny1, nx0, nx1)
-    addr_raw = zone_lines_fn(engine, card, ay0, ay1, ax0, ax1)
+    # One solid scale keeps Arabic words intact; padding helps edge glyphs
+    name_raw = zone_lines_fn(engine, card, ny0, ny1, nx0, nx1, scale=1.7)
+    addr_raw = zone_lines_fn(engine, card, ay0, ay1, ax0, ax1, scale=1.7)
 
     name_lines = _lines_from_zone_ocr(name_raw, kind="name")
     addr_lines = _lines_from_zone_ocr(addr_raw, kind="address")
-    # Drop address lines that duplicated the name
     if name_lines:
         addr_lines = [
             a
@@ -1768,7 +1966,8 @@ class EgyptianIdExtractor:
         x1r: float,
         *,
         index_base: int,
-        scale: float = 2.2,
+        scale: float = 1.8,
+        mode: str = "text",
     ) -> list[OcrToken]:
         h, w = card.shape[:2]
         y0, y1 = int(h * y0r), int(h * y1r)
@@ -1776,27 +1975,27 @@ class EgyptianIdExtractor:
         roi = card[y0:y1, x0:x1]
         if not roi.size:
             return []
-        big = cv2.resize(roi, None, fx=scale, fy=scale, interpolation=cv2.INTER_CUBIC)
-        big = enhance_id_card(big)
-        blocks = engine.ocr_bgr(big, enhance=False)
-        nh, nw = big.shape[:2]
+        variants = prepare_zone_roi(roi, mode=mode, scale=scale)
         out: list[OcrToken] = []
-        for i, b in enumerate(blocks):
-            text = str(b.text or "").strip()
-            if not text:
-                continue
-            out.append(
-                OcrToken(
-                    index=index_base + i,
-                    text=text,
-                    score=float(b.score or 0),
-                    x0=x0r + (b.x0 / max(nw, 1)) * (x1r - x0r),
-                    y0=y0r + (b.y0 / max(nh, 1)) * (y1r - y0r),
-                    x1=x0r + (b.x1 / max(nw, 1)) * (x1r - x0r),
-                    y1=y0r + (b.y1 / max(nh, 1)) * (y1r - y0r),
+        for vi, big in enumerate(variants):
+            blocks = engine.ocr_bgr(big, enhance=False)
+            nh, nw = big.shape[:2]
+            for i, b in enumerate(blocks):
+                text = str(b.text or "").strip()
+                if not text:
+                    continue
+                out.append(
+                    OcrToken(
+                        index=index_base + vi * 100 + i,
+                        text=text,
+                        score=float(b.score or 0),
+                        x0=x0r + (b.x0 / max(nw, 1)) * (x1r - x0r),
+                        y0=y0r + (b.y0 / max(nh, 1)) * (y1r - y0r),
+                        x1=x0r + (b.x1 / max(nw, 1)) * (x1r - x0r),
+                        y1=y0r + (b.y1 / max(nh, 1)) * (y1r - y0r),
+                    )
                 )
-            )
-        return out
+        return merge_token_lists(out) if out else []
 
     def _zone_lines(
         self,
@@ -1808,11 +2007,20 @@ class EgyptianIdExtractor:
         x1r: float,
         *,
         scale: float = 1.8,
+        mode: str = "text",
     ) -> list[str]:
         toks = self._zone_tokens(
-            engine, card, y0r, y1r, x0r, x1r, index_base=0, scale=scale
+            engine,
+            card,
+            y0r,
+            y1r,
+            x0r,
+            x1r,
+            index_base=0,
+            scale=scale,
+            mode=mode,
         )
-        lines = _cluster_tokens_into_lines(toks, y_thresh=0.07)
+        lines = _cluster_tokens_into_lines(toks, y_thresh=0.08)
         out: list[str] = []
         for ln in lines:
             text = _merge_line_scraps(_line_text(ln))
@@ -1843,6 +2051,7 @@ class EgyptianIdExtractor:
             except Exception:  # noqa: BLE001
                 logger.debug("warp failed", exc_info=True)
                 card = original
+        card = auto_deskew_card(card)
 
         # PaddleOCR can AV-crash on very large ID photos on some Windows setups;
         # keep a display card, OCR a capped working copy.
@@ -1857,6 +2066,8 @@ class EgyptianIdExtractor:
                 (int(cw * scale), int(ch * scale)),
                 interpolation=cv2.INTER_AREA,
             )
+        # Mild global enhance helps faint black print over pyramid background
+        ocr_card_enh = enhance_id_card(ocr_card)
 
         face_box = face_box_norm(ocr_card)
         engine = ArabicOcrEngine.get()
@@ -1867,15 +2078,17 @@ class EgyptianIdExtractor:
             face_box=face_box,
         )
 
-        side = guess_side(tokens)
+        side = guess_side(tokens, ocr_card)
+        rules_side = [f"SIDE_DETECT: {side}"]
         fields, decoded, rules = apply_field_rules(
             tokens, side, face_box=face_box if side != "back" else None
         )
+        rules = rules_side + rules
 
-        # FRONT: force name/address from exact ID_ZONES crops
+        # FRONT: name/address from layout zones (enhanced card for faint ink)
         if side != "back":
             z_name, z_addr, z_notes = pick_best_front_zones(
-                engine, ocr_card, self._zone_lines, face_box=face_box
+                engine, ocr_card_enh, self._zone_lines, face_box=face_box
             )
             rules.extend(z_notes)
             if z_name:
@@ -1885,20 +2098,56 @@ class EgyptianIdExtractor:
                 fields["address"] = z_addr
                 rules.append("ZONE_EXACT: العنوان من منطقة address في ID_ZONES")
 
+            # If enhanced crop missed a field, retry once on raw ocr_card
+            if not fields.get("full_name") or not fields.get("address"):
+                n2, a2, notes2 = pick_best_front_zones(
+                    engine, ocr_card, self._zone_lines, face_box=face_box
+                )
+                rules.extend(notes2)
+                if n2 and not fields.get("full_name"):
+                    fields["full_name"] = n2
+                if a2 and (
+                    not fields.get("address")
+                    or _line_quality(a2, kind="address")
+                    > _line_quality(str(fields.get("address") or ""), kind="address")
+                ):
+                    fields["address"] = a2
+
+            # Dedicated NID digits pass if missing
+            if not fields.get("national_id"):
+                nx0, ny0, nx1, ny1 = pad_zone(ID_ZONES["front"]["national_id"], 0.02)
+                nid_lines = self._zone_lines(
+                    engine, ocr_card_enh, ny0, ny1, nx0, nx1, scale=2.0, mode="digits"
+                )
+                nid = find_national_id_from_tokens(
+                    [
+                        OcrToken(9000 + i, ln, 0.9, nx0, ny0, nx1, ny1)
+                        for i, ln in enumerate(nid_lines)
+                    ]
+                )
+                if nid:
+                    fields["national_id"] = nid
+                    decoded2 = decode_national_id(nid)
+                    if decoded2.get("valid"):
+                        decoded = decoded2
+                        fields["birth_date"] = decoded2.get("birth_date")
+                        fields["governorate"] = decoded2.get("governorate")
+                        fields["gender"] = decoded2.get("gender")
+                    rules.append("ZONE_NID: الرقم القومي من منطقة national_id")
+
         # Back-side dedicated zones (job / status / expiry) — above barcode
         if side == "back":
-            jx0, jy0, jx1, jy1 = ID_ZONES["back"]["job"]
-            sx0, sy0, sx1, sy1 = ID_ZONES["back"]["status"]
-            ex0, ey0, ex1, ey1 = ID_ZONES["back"]["expiry"]
-            job_zone = self._zone_lines(engine, ocr_card, jy0, jy1, jx0, jx1)
-            status_zone = self._zone_lines(engine, ocr_card, sy0, sy1, sx0, sx1)
-            expiry_zone = self._zone_lines(engine, ocr_card, ey0, ey1, ex0, ex1)
-            # Re-parse with zone-focused tokens merged
+            jx0, jy0, jx1, jy1 = pad_zone(ID_ZONES["back"]["job"], 0.02)
+            sx0, sy0, sx1, sy1 = pad_zone(ID_ZONES["back"]["status"], 0.02)
+            ex0, ey0, ex1, ey1 = pad_zone(ID_ZONES["back"]["expiry"], 0.02)
+            job_zone = self._zone_lines(engine, ocr_card_enh, jy0, jy1, jx0, jx1)
+            status_zone = self._zone_lines(engine, ocr_card_enh, sy0, sy1, sx0, sx1)
+            expiry_zone = self._zone_lines(engine, ocr_card_enh, ey0, ey1, ex0, ex1)
             zone_toks = merge_token_lists(
                 tokens,
-                self._zone_tokens(engine, ocr_card, jy0, jy1, jx0, jx1, index_base=4000),
-                self._zone_tokens(engine, ocr_card, sy0, sy1, sx0, sx1, index_base=5000),
-                self._zone_tokens(engine, ocr_card, ey0, ey1, ex0, ex1, index_base=6000),
+                self._zone_tokens(engine, ocr_card_enh, jy0, jy1, jx0, jx1, index_base=4000),
+                self._zone_tokens(engine, ocr_card_enh, sy0, sy1, sx0, sx1, index_base=5000),
+                self._zone_tokens(engine, ocr_card_enh, ey0, ey1, ex0, ex1, index_base=6000),
             )
             back2, notes2 = extract_back_fields(zone_toks)
             for k, v in back2.items():
@@ -1910,7 +2159,6 @@ class EgyptianIdExtractor:
                     fields[k] = v
             rules.extend(notes2)
             rules.append("ZONE_BACK: قراءة مناطق الظهر (مهنة/حالة/سريان)")
-            # Prefer clearest job line from job_zone
             for ln in job_zone:
                 n = normalize_ar(ln)
                 if any(normalize_ar(h) in n for h in JOB_HINTS) and len(ln) >= 8:
@@ -1920,6 +2168,23 @@ class EgyptianIdExtractor:
                 exp = extract_expiry_date(expiry_zone + status_zone)
                 if exp:
                     fields["expiry_date"] = exp
+            # Parse status line for gender/religion/marital if missing
+            status_blob = normalize_ar(" ".join(status_zone))
+            if not fields.get("gender"):
+                if "ذكر" in status_blob:
+                    fields["gender"] = "ذكر"
+                elif "انثى" in status_blob:
+                    fields["gender"] = "أنثى"
+            if not fields.get("religion"):
+                for r in RELIGION_VALUES:
+                    if normalize_ar(r) in status_blob:
+                        fields["religion"] = r
+                        break
+            if not fields.get("marital_status"):
+                for m in MARITAL_VALUES:
+                    if normalize_ar(m) in status_blob:
+                        fields["marital_status"] = m
+                        break
 
         ocr_list = [
             {
@@ -1938,7 +2203,7 @@ class EgyptianIdExtractor:
             "original": _encode_image_b64(preview, quality=80),
             "card": _encode_image_b64(card, quality=88),
         }
-        crop_pack = build_field_crops(card, tokens, fields, face)
+        crop_pack = build_field_crops(card, tokens, fields, face, side=side)
         if crop_pack.get("face"):
             images["face"] = crop_pack["face"]
         elif face is not None and face.size:
@@ -2076,17 +2341,46 @@ def annotate_field_regions(
     return out
 
 
+# Field key → ID_ZONES box name (must match the overlay the user was shown)
+FIELD_TO_ZONE: dict[str, tuple[str, str]] = {
+    # field_key: (side, zone_name)
+    "full_name": ("front", "name"),
+    "address": ("front", "address"),
+    "national_id": ("front", "national_id"),
+    "face": ("front", "face"),
+    "job": ("back", "job"),
+    "religion": ("back", "status"),
+    "marital_status": ("back", "status"),
+    "gender": ("back", "status"),
+    "husband_name": ("back", "status"),
+    "expiry_date": ("back", "expiry"),
+}
+
+
+def zone_box_for_field(field_key: str, side: str) -> tuple[float, float, float, float] | None:
+    mapping = FIELD_TO_ZONE.get(field_key)
+    if not mapping:
+        return None
+    z_side, z_name = mapping
+    if side == "front" and z_side != "front":
+        return None
+    if side == "back" and z_side != "back":
+        return None
+    return ID_ZONES.get(z_side, {}).get(z_name)
+
+
 def build_field_crops(
     card: np.ndarray,
     tokens: list[OcrToken],
     fields: dict[str, Any],
     face: np.ndarray | None,
+    *,
+    side: str = "front",
 ) -> dict[str, Any]:
-    """Build per-field source crops + annotated card (front or back)."""
-    crop_keys = [
-        "full_name",
-        "address",
-        "national_id",
+    """Crop + annotate using fixed ID_ZONES (same boxes as layout overlay)."""
+    _ = tokens  # zones are layout-fixed; OCR tokens not used for boxes
+    crop_keys_front = ["full_name", "address", "national_id"]
+    crop_keys_back = [
         "job",
         "religion",
         "marital_status",
@@ -2094,47 +2388,37 @@ def build_field_crops(
         "husband_name",
         "expiry_date",
     ]
-    regions: dict[str, list[OcrToken]] = {}
+    crop_keys = crop_keys_front if side != "back" else crop_keys_back
+
     crops: dict[str, str] = {}
     meta: dict[str, Any] = {}
 
     for key in crop_keys:
-        val = fields.get(key)
-        toks = tokens_for_value(tokens, val if isinstance(val, str) else None)
-        if not toks:
+        box = zone_box_for_field(key, "front" if side != "back" else "back")
+        if box is None:
             continue
-        regions[key] = toks
-        box = union_norm_bbox(toks)
         roi = crop_norm_region(card, box)
         if roi is not None and roi.size:
             crops[key] = _encode_image_b64(roi, quality=90)
             meta[key] = {
-                "bbox_norm": [round(x, 4) for x in (box or (0, 0, 0, 0))],
-                "token_texts": [t.text for t in toks],
+                "bbox_norm": [round(x, 4) for x in box],
+                "zone": FIELD_TO_ZONE[key][1],
+                "value": fields.get(key),
             }
 
-    annotated = annotate_field_regions(card, regions)
-    # Draw face box if present
-    faces = detect_faces(card)
-    if faces:
-        x, y, bw, bh = faces[0]
-        cv2.rectangle(annotated, (x, y), (x + bw, y + bh), (0, 180, 220), 2)
-        cv2.putText(
-            annotated,
-            "face",
-            (x, max(16, y - 6)),
-            cv2.FONT_HERSHEY_SIMPLEX,
-            0.5,
-            (0, 180, 220),
-            2,
-            cv2.LINE_AA,
-        )
+    # Annotated image = exact ID_ZONES overlay (matches front_zones.jpg layout)
+    layout_side = "back" if side == "back" else "front"
+    annotated = draw_id_zones(card, layout_side, thickness=2)
 
     out: dict[str, Any] = {
         "annotated": _encode_image_b64(annotated, quality=88),
         "crops": crops,
         "crop_meta": meta,
     }
-    if face is not None and face.size:
-        out["face"] = _encode_image_b64(face, quality=90)
+    if layout_side == "front":
+        face_roi = crop_norm_region(card, ID_ZONES["front"]["face"])
+        if face is not None and face.size:
+            out["face"] = _encode_image_b64(face, quality=90)
+        elif face_roi is not None and face_roi.size:
+            out["face"] = _encode_image_b64(face_roi, quality=90)
     return out
