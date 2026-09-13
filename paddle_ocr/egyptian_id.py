@@ -47,10 +47,10 @@ ID_ZONES: dict[str, dict[str, tuple[float, float, float, float]]] = {
         "name": (0.42, 0.24, 0.98, 0.46),
         # العنوان سطرين — فوق الرقم القومي فقط
         "address": (0.45, 0.46, 0.98, 0.68),
-        # الرقم القومي — شريط الأرقام السفلي يمينًا (بدون يسار زيادة)
-        "national_id": (0.34, 0.70, 0.98, 0.88),
-        # تاريخ الميلاد المطبوع — سطر خفيف تحت الصورة فوق النسر
-        "birth_date": (0.02, 0.64, 0.38, 0.78),
+        # الرقم القومي — كامل الـ 14 رقم (يسارًا بما يكفي للـ ٣ الأولى)
+        "national_id": (0.30, 0.68, 0.99, 0.90),
+        # تاريخ الميلاد المطبوع — سطر كامل تحت الصورة (يشمل النسر ونهاية اليوم)
+        "birth_date": (0.02, 0.60, 0.52, 0.86),
         # رقم المصنع
         "serial": (0.04, 0.87, 0.35, 0.98),
     },
@@ -1436,22 +1436,10 @@ def best_national_id_from_texts(texts: list[str]) -> str | None:
 def birth_date_zone_box(
     face_box: tuple[float, float, float, float] | None = None,
 ) -> tuple[float, float, float, float]:
-    """DOB sits under the personal photo on the left of Egyptian ID front."""
-    fallback = ID_ZONES["front"]["birth_date"]
-    # Portrait frame from layout is more stable than YuNet (often crops chin only)
-    layout_face = ID_ZONES["front"]["face"]
-    fy1_layout = layout_face[3]
-    if not face_box:
-        return fallback
-    fx0, _fy0, fx1, fy1 = face_box
-    fy1 = max(fy1, fy1_layout - 0.02)
-    x0 = max(0.02, min(fx0, layout_face[0]) - 0.01)
-    x1 = min(0.45, max(fx1 + 0.08, 0.36))
-    y0 = max(0.55, min(0.66, fy1 - 0.01))
-    y1 = min(0.80, y0 + 0.18)
-    if y1 - y0 < 0.08:
-        return fallback
-    return (x0, y0, x1, y1)
+    """DOB sits under the personal photo — use stable layout band (full date line)."""
+    # Fixed layout is more reliable than YuNet face bottom (often truncates the date)
+    _ = face_box
+    return ID_ZONES["front"]["birth_date"]
 
 
 def _has_ocr_garbage(text: str) -> bool:
@@ -3582,14 +3570,17 @@ def build_field_crops(
         if zone_box is None:
             continue
         value = fields.get(key)
-        # For DOB always show the layout zone under the photo (equation DOB
-        # has no matching OCR tokens on the right-side NID band).
-        if key == "birth_date":
+        # NID/DOB: always use full layout zone — token union often clips
+        # leading digits (NID) or misses faint print (DOB under eagle).
+        if key in {"birth_date", "national_id"}:
             tight = None
         else:
             tight = _token_crop_box_for_field(tokens, key, value, zone_box)
         box = tight or zone_box
-        roi = crop_norm_region(card, box)
+        # Extra pad on digit fields so UI crops aren't edge-clipped
+        if key in {"birth_date", "national_id"}:
+            box = pad_zone(box, 0.01 if key == "national_id" else 0.008)
+        roi = crop_norm_region(card, box, min_h=56 if key == "birth_date" else 36)
         if roi is not None and roi.size:
             crops[key] = _encode_image_b64(roi, quality=90)
             meta[key] = {

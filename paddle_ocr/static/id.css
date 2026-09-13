@@ -285,7 +285,7 @@
 .id-crop-card img {
   display: block;
   width: 100%;
-  max-height: 120px;
+  max-height: 160px;
   object-fit: contain;
   background: linear-gradient(145deg, #e8f2ee, #f3efe6);
 }
@@ -315,11 +315,17 @@
 
 .id-field-crop {
   width: 100%;
-  max-height: 64px;
+  max-height: 110px;
   object-fit: contain;
   border-radius: 8px;
   background: rgba(216, 243, 234, 0.45);
   border: 1px solid rgba(20, 92, 76, 0.12);
+}
+
+.id-field-crop[alt="national_id-crop"],
+.id-field-crop[alt="birth_date-crop"] {
+  max-height: 140px;
+  image-rendering: auto;
 }
 
 @media (max-width: 820px) {
