@@ -43,8 +43,8 @@ ID_ZONES: dict[str, dict[str, tuple[float, float, float, float]]] = {
         "face": (0.02, 0.08, 0.30, 0.58),
         # الهيدر الأخضر
         "header": (0.38, 0.02, 0.96, 0.22),
-        # الاسم سطرين — تحت الهيدر (لا يتداخل مع «بطاقة تحقيق الشخصية»)
-        "name": (0.42, 0.28, 0.98, 0.46),
+        # الاسم سطرين — تحت الهيدر مباشرة (يشمل الاسم الأول)
+        "name": (0.42, 0.24, 0.98, 0.46),
         # العنوان سطرين — فوق الرقم القومي فقط
         "address": (0.45, 0.46, 0.98, 0.68),
         # الرقم القومي
@@ -911,7 +911,13 @@ def finalize_front_address(
         nw = normalize_ar(w)
         if not nw or nw in seen:
             continue
-        if any(nw in s and nw != s for s in seen):
+        # Near-duplicates / OCR variants of already-kept place words
+        if any(
+            (nw in s or s in nw)
+            and abs(len(nw) - len(s)) <= 2
+            and min(len(nw), len(s)) >= 4
+            for s in seen
+        ):
             continue
         seen.add(nw)
         deduped.append(w)
@@ -925,8 +931,9 @@ def finalize_front_address(
 def _effective_name_box(tokens: list[OcrToken]) -> tuple[float, float, float, float]:
     x0, y0, x1, y1 = ID_ZONES["front"]["name"]
     if tokens:
-        y0 = max(y0, _header_bottom_y(tokens) + 0.012)
-    return (x0, max(y0, 0.26), x1, y1)
+        # Keep a small gap under header, but never cut the first-name line
+        y0 = max(y0, min(_header_bottom_y(tokens) + 0.008, 0.30))
+    return (x0, max(0.22, min(y0, 0.30)), x1, y1)
 
 
 def _effective_address_box(tokens: list[OcrToken]) -> tuple[float, float, float, float]:
@@ -2709,13 +2716,25 @@ class EgyptianIdExtractor:
             preview = cv2.resize(preview, (int(pw * s), int(ph * s)))
 
         card = original
-        quad = detect_card_quad(original)
-        if quad is not None:
-            try:
-                card = warp_card(original, quad)
-            except Exception:  # noqa: BLE001
-                logger.debug("warp failed", exc_info=True)
-                card = original
+        crop_method = "raw"
+        try:
+            from card_crop import crop_id_card
+
+            card, crop_method = crop_id_card(
+                original,
+                fallback_quad_fn=detect_card_quad,
+                warp_fn=warp_card,
+            )
+        except Exception:  # noqa: BLE001
+            logger.debug("ML card crop unavailable", exc_info=True)
+            quad = detect_card_quad(original)
+            if quad is not None:
+                try:
+                    card = warp_card(original, quad)
+                    crop_method = "contour"
+                except Exception:  # noqa: BLE001
+                    logger.debug("warp failed", exc_info=True)
+                    card = original
         card = auto_deskew_card(card)
 
         # PaddleOCR can AV-crash on very large ID photos on some Windows setups;
@@ -2757,10 +2776,10 @@ class EgyptianIdExtractor:
 
         if forced_side in {"front", "back"}:
             side = forced_side
-            rules_side = [f"SIDE_FORCED: {side}"]
+            rules_side = [f"SIDE_FORCED: {side}", f"CROP: {crop_method}"]
         else:
             side = guess_side(tokens + onnx_tokens, ocr_card)
-            rules_side = [f"SIDE_DETECT: {side}"]
+            rules_side = [f"SIDE_DETECT: {side}", f"CROP: {crop_method}"]
         fields, decoded, rules = apply_field_rules(
             tokens, side, face_box=face_box if side != "back" else None
         )
@@ -3186,7 +3205,7 @@ def build_field_crops(
     *,
     side: str = "front",
 ) -> dict[str, Any]:
-    """Crop + annotate using fixed ID_ZONES (same boxes as layout overlay)."""
+    """Crop previews: prefer OCR-token union clipped to layout zone (tight & accurate)."""
     crop_keys_front = ["full_name", "address", "national_id"]
     crop_keys_back = [
         "job",
@@ -3197,38 +3216,126 @@ def build_field_crops(
         "expiry_date",
     ]
     crop_keys = crop_keys_front if side != "back" else crop_keys_back
+    layout = "front" if side != "back" else "back"
 
     crops: dict[str, str] = {}
     meta: dict[str, Any] = {}
 
     for key in crop_keys:
-        box = zone_box_for_field(
-            key, "front" if side != "back" else "back", tokens=tokens
-        )
-        if box is None:
+        zone_box = zone_box_for_field(key, layout, tokens=tokens)
+        if zone_box is None:
             continue
+        value = fields.get(key)
+        # Tight crop from tokens that match the extracted field text
+        tight = _token_crop_box_for_field(tokens, key, value, zone_box)
+        box = tight or zone_box
         roi = crop_norm_region(card, box)
         if roi is not None and roi.size:
             crops[key] = _encode_image_b64(roi, quality=90)
             meta[key] = {
                 "bbox_norm": [round(x, 4) for x in box],
                 "zone": FIELD_TO_ZONE[key][1],
-                "value": fields.get(key),
+                "value": value,
+                "crop_mode": "tokens" if tight else "zone",
             }
 
-    # Annotated image = exact ID_ZONES overlay (matches front_zones.jpg layout)
-    layout_side = "back" if side == "back" else "front"
-    annotated = draw_id_zones(card, layout_side, thickness=2)
+    annotated = draw_id_zones(card, layout, thickness=2)
+    # Draw actual crop boxes used in UI (cyan) so user sees what was cropped
+    h, w = annotated.shape[:2]
+    for key, info in meta.items():
+        bb = info.get("bbox_norm")
+        if not bb:
+            continue
+        x0, y0, x1, y1 = bb
+        cv2.rectangle(
+            annotated,
+            (int(x0 * w), int(y0 * h)),
+            (int(x1 * w), int(y1 * h)),
+            (255, 200, 40),
+            2,
+        )
 
     out: dict[str, Any] = {
         "annotated": _encode_image_b64(annotated, quality=88),
         "crops": crops,
         "crop_meta": meta,
     }
-    if layout_side == "front":
+    if layout == "front":
         face_roi = crop_norm_region(card, ID_ZONES["front"]["face"])
         if face is not None and face.size:
             out["face"] = _encode_image_b64(face, quality=90)
         elif face_roi is not None and face_roi.size:
             out["face"] = _encode_image_b64(face_roi, quality=90)
     return out
+
+
+def _token_crop_box_for_field(
+    tokens: list[OcrToken],
+    field_key: str,
+    value: Any,
+    zone_box: tuple[float, float, float, float],
+) -> tuple[float, float, float, float] | None:
+    """Build a tight bbox from tokens whose text appears in the field value,
+    constrained to stay inside the layout zone (± small pad).
+    """
+    if not tokens or not value:
+        return None
+    text = str(value).strip()
+    if not text:
+        return None
+    n_val = normalize_ar(text)
+    words = {w for w in n_val.split() if len(w) >= 2}
+    if not words and field_key != "national_id":
+        return None
+
+    zx0, zy0, zx1, zy1 = zone_box
+    # Slightly expand zone for matching; final box still clipped
+    pad_z = 0.03
+    mx0, my0 = max(0.0, zx0 - pad_z), max(0.0, zy0 - pad_z)
+    mx1, my1 = min(1.0, zx1 + pad_z), min(1.0, zy1 + pad_z)
+
+    hits: list[OcrToken] = []
+    for t in tokens:
+        if not (mx0 <= t.cx <= mx1 and my0 <= t.cy <= my1):
+            continue
+        tn = t.norm_text
+        if not tn:
+            continue
+        if field_key == "national_id":
+            digits = _digit_soup(t.text)
+            if len(digits) >= 6 and digits in _digit_soup(text):
+                hits.append(t)
+            continue
+        # Token is a word from the field, or field contains the token
+        if tn in words or any(tn in w or w in tn for w in words if len(w) >= 3):
+            # Skip header bleed for name
+            if field_key == "full_name" and (
+                "بطاق" in tn or "تحقيق" in tn or "شخص" in tn or "جمهور" in tn
+            ):
+                continue
+            if field_key == "address" and len(_digit_soup(t.text)) >= 10:
+                continue
+            hits.append(t)
+
+    if len(hits) < 1:
+        return None
+    # Need at least 2 hits for multi-word fields, else keep zone
+    if field_key in {"full_name", "address", "job"} and len(hits) < 2:
+        # Single strong hit still OK if it covers most of the value
+        if len(hits) == 1 and len(normalize_ar(hits[0].text)) < max(4, len(n_val) // 2):
+            return None
+
+    bx0 = min(t.x0 for t in hits)
+    by0 = min(t.y0 for t in hits)
+    bx1 = max(t.x1 for t in hits)
+    by1 = max(t.y1 for t in hits)
+    # Pad slightly, then clamp to zone (name: allow a bit above zone for first line)
+    pad = 0.015
+    top_slack = 0.04 if field_key == "full_name" else 0.0
+    bx0 = max(max(0.0, zx0 - 0.02), bx0 - pad)
+    by0 = max(max(0.0, zy0 - top_slack), by0 - pad)
+    bx1 = min(min(1.0, zx1 + 0.02), bx1 + pad)
+    by1 = min(zy1 + 0.01, by1 + pad)
+    if bx1 - bx0 < 0.05 or by1 - by0 < 0.02:
+        return None
+    return (bx0, by0, bx1, by1)
