@@ -3034,9 +3034,9 @@ class EgyptianIdExtractor:
         filled = sum(1 for k, v in fields.items() if v and k != "card_side")
         crop_n = len(images["crops"]) + (1 if images.get("face") else 0)
         message = (
-            f"تم ضبط {filled} حقل · {crop_n} قصّة من الصورة ({fields.get('card_side')})."
+            f"[v2026-09-13b · قص={crop_method}] تم ضبط {filled} حقل · {crop_n} قصّة ({fields.get('card_side')})."
             if filled
-            else "القراءة ضعيفة — صوّر البطاقة بشكل أوضح أو ارفع الوجه الآخر."
+            else f"[v2026-09-13b · قص={crop_method}] القراءة ضعيفة — صوّر أوضح أو ارفع الوجه الآخر."
         )
 
         return EgyptianIdResult(

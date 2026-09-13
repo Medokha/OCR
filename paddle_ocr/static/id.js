@@ -287,14 +287,16 @@
         images.annotated || images.card || null
       );
       renderRules(data.rules || [], data.decoded || {});
+      const pipe = data.pipeline || "?";
+      const cropM = data.crop_method || "?";
+      const doneMsg =
+        resolvedSide === "back" ? "اكتمل استخراج الظهر" : "اكتمل استخراج الوجه";
+      setStatus(
+        `${doneMsg} · ${data.message || ""} · محرك ${pipe} · قص ${cropM}`
+      );
       metaEl.textContent = data.message || "";
       rawEl.textContent = data.raw_text || "(فارغ)";
       resultsEl.hidden = false;
-      setStatus(
-        resolvedSide === "back"
-          ? "اكتمل استخراج الظهر"
-          : "اكتمل استخراج الوجه"
-      );
     } catch (err) {
       const msg = String(err && err.message ? err.message : err);
       if (/failed to fetch|networkerror|load failed/i.test(msg)) {

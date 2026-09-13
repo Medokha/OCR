@@ -189,6 +189,15 @@ async def ocr_egyptian_id(
         payload["ok"] = True
         payload["filename"] = file.filename
         payload["forced_side"] = side_norm
+        payload["pipeline"] = "v2026-09-13b"
+        # Surface crop method for UI verification
+        crop_rule = next(
+            (r for r in (payload.get("rules") or []) if str(r).startswith("CROP:")),
+            None,
+        )
+        payload["crop_method"] = (
+            str(crop_rule).split(":", 1)[-1].strip() if crop_rule else "unknown"
+        )
         return JSONResponse(payload)
     except HTTPException:
         raise
