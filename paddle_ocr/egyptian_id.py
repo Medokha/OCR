@@ -55,14 +55,14 @@ ID_ZONES: dict[str, dict[str, tuple[float, float, float, float]]] = {
         "serial": (0.04, 0.87, 0.35, 0.98),
     },
     "back": {
-         # المهنة (سطر أو سطرين أعلى الظهر)
-        "job": (0.04, 0.03, 0.96, 0.27),
-        # نوع / ديانة / حالة اجتماعية — بدون تداخل مع المهنة
-        "status": (0.04, 0.27, 0.96, 0.42),
-        # البطاقة سارية حتى …
-        "expiry": (0.04, 0.42, 0.96, 0.58),
+        # المهنة (أعلى الظهر) — بدون تداخل مع شريط الحالة
+        "job": (0.04, 0.02, 0.96, 0.25),
+        # نوع / ديانة / حالة اجتماعية
+        "status": (0.04, 0.25, 0.96, 0.40),
+        # البطاقة سارية حتى … (فوق الباركود مباشرة)
+        "expiry": (0.04, 0.38, 0.96, 0.62),
         # الباركود ثنائي الأبعاد
-        "barcode": (0.02, 0.58, 0.98, 0.98),
+        "barcode": (0.02, 0.60, 0.98, 0.98),
     },
 }
 
@@ -1030,45 +1030,125 @@ def _match_known_value(text: str, values: tuple[str, ...]) -> str | None:
 
 
 def extract_expiry_date(texts: list[str]) -> str | None:
-    for text in texts:
-        n = normalize_ar(text)
-        ascii_t = to_ascii_digits(text)
-        interesting = (
-            "ساريه" in n
-            or "سارية" in n
-            or "حتى" in n
-            or "بطاقه" in n
-            or "بطاقة" in text
-            or bool(re.search(r"20\d{2}", ascii_t))
-        )
-        if not interesting:
+    """Parse card validity date near «سارية حتى» (YYYY-MM-DD)."""
+
+    def _from_ascii(ascii_t: str) -> str | None:
+        if not ascii_t:
+            return None
+        for m in re.finditer(
+            r"(20\d{2})\s*[/\-.\s]\s*(\d{1,2})\s*[/\-.\s]\s*(\d{1,2})",
+            ascii_t,
+        ):
+            y, mo, d = int(m.group(1)), int(m.group(2)), int(m.group(3))
+            if 1 <= mo <= 12 and 1 <= d <= 31:
+                return f"{y:04d}-{mo:02d}-{d:02d}"
+        for m in re.finditer(
+            r"(\d{1,2})\s*[/\-.\s]\s*(\d{1,2})\s*[/\-.\s]\s*(20\d{2})",
+            ascii_t,
+        ):
+            a, b, y = int(m.group(1)), int(m.group(2)), int(m.group(3))
+            if a <= 31 and 1 <= b <= 12:
+                return f"{y:04d}-{b:02d}-{a:02d}"
+            if b <= 31 and 1 <= a <= 12:
+                return f"{y:04d}-{a:02d}-{b:02d}"
+        # Compact YYYYMMDD
+        digits = re.sub(r"\D", "", ascii_t)
+        for i in range(0, max(0, len(digits) - 7)):
+            chunk = digits[i : i + 8]
+            if not chunk.startswith("20"):
+                continue
+            y, mo, d = int(chunk[:4]), int(chunk[4:6]), int(chunk[6:8])
+            if 2000 <= y <= 2099 and 1 <= mo <= 12 and 1 <= d <= 31:
+                return f"{y:04d}-{mo:02d}-{d:02d}"
+        return None
+
+    # Prefer lines that mention validity, then their neighbors, then all
+    ranked: list[str] = []
+    for i, text in enumerate(texts):
+        n = normalize_ar(text or "")
+        if any(k in n for k in ("ساري", "حتى", "بطاق")) or re.search(
+            r"20\d{2}", to_ascii_digits(text or "")
+        ):
+            ranked.append(text)
+            if i + 1 < len(texts):
+                ranked.append(texts[i + 1])
+            if i > 0:
+                ranked.append(texts[i - 1])
+    for text in list(texts) + ranked:
+        got = _from_ascii(to_ascii_digits(text or ""))
+        if got:
+            return got
+    joined = to_ascii_digits(" ".join(texts))
+    return _from_ascii(joined)
+
+
+def finalize_back_job(text: str | None) -> str | None:
+    """Clean profession field — strip labels and collapse duplicated OCR lines."""
+    if not text:
+        return None
+    t = apply_ocr_word_fixes(str(text)).strip()
+    if not t:
+        return None
+    n = normalize_ar(t)
+    for lbl in ("المهنه", "المهنة", "مهنة"):
+        if lbl in n:
+            # Keep text after label if present, else drop label word only
+            if n.startswith(lbl) or f" {lbl} " in f" {n} ":
+                after = n.split(lbl, 1)[-1].strip(" :：-")
+                if after and len(after) >= 3:
+                    # Rebuild from original roughly by removing label once
+                    t2 = re.sub(
+                        r"المهنة|المهنه|مهنة",
+                        "",
+                        t,
+                        count=1,
+                    ).strip(" :：-")
+                    t = t2 or t
+                    n = normalize_ar(t)
+            break
+    words = [w for w in t.split() if w]
+    out_w: list[str] = []
+    for w in words:
+        if out_w and normalize_ar(out_w[-1]) == normalize_ar(w):
             continue
-        m = re.search(r"(20\d{2})\s*[/\-.]\s*(\d{1,2})\s*[/\-.]\s*(\d{1,2})", ascii_t)
-        if m:
-            y, mo, d = m.group(1), int(m.group(2)), int(m.group(3))
-            if 1 <= mo <= 12 and 1 <= d <= 31:
-                return f"{y}-{mo:02d}-{d:02d}"
-        m2 = re.search(r"(\d{1,2})\s*[/\-.]\s*(\d{1,2})\s*[/\-.]\s*(20\d{2})", ascii_t)
-        if m2:
-            a, b, y = int(m2.group(1)), int(m2.group(2)), m2.group(3)
-            if a <= 31 and b <= 12:
-                return f"{y}-{b:02d}-{a:02d}"
-            if b <= 31 and a <= 12:
-                return f"{y}-{a:02d}-{b:02d}"
-    joined_a = to_ascii_digits(" ".join(texts))
-    joined_n = normalize_ar(" ".join(texts))
-    if "ساري" in joined_n or "حتى" in joined_n or re.search(r"20\d{2}", joined_a):
-        m = re.search(r"(20\d{2})\s*[/\-.]\s*(\d{1,2})\s*[/\-.]\s*(\d{1,2})", joined_a)
-        if m:
-            y, mo, d = m.group(1), int(m.group(2)), int(m.group(3))
-            if 1 <= mo <= 12 and 1 <= d <= 31:
-                return f"{y}-{mo:02d}-{d:02d}"
-        m2 = re.search(r"(\d{1,2})\s*[/\-.]\s*(\d{1,2})\s*[/\-.]\s*(20\d{2})", joined_a)
-        if m2:
-            a, b, y = int(m2.group(1)), int(m2.group(2)), m2.group(3)
-            if a <= 31 and b <= 12:
-                return f"{y}-{b:02d}-{a:02d}"
-    return None
+        out_w.append(w)
+    joined = " ".join(out_w).strip()
+    # Full-line duplicate: "X Y X Y" or "X X"
+    parts = joined.split()
+    if len(parts) >= 2:
+        mid = len(parts) // 2
+        left, right = " ".join(parts[:mid]), " ".join(parts[mid:])
+        if normalize_ar(left) == normalize_ar(right):
+            joined = left
+        elif normalize_ar(right) and normalize_ar(right) in normalize_ar(left):
+            joined = left
+        elif normalize_ar(left) and normalize_ar(left) in normalize_ar(right):
+            joined = right
+    # Drop trailing status words accidentally glued into job
+    cleaned: list[str] = []
+    status_stop = {
+        normalize_ar(x)
+        for x in RELIGION_VALUES + MARITAL_VALUES + GENDER_VALUES + ("انثى", "أنثى")
+    }
+    for w in joined.split():
+        if normalize_ar(w) in status_stop:
+            break
+        cleaned.append(w)
+    joined = " ".join(cleaned).strip() or joined
+    return joined or None
+
+
+def _jobs_near_duplicate(a: str, b: str) -> bool:
+    na, nb = normalize_ar(a), normalize_ar(b)
+    if not na or not nb:
+        return False
+    if na == nb or na in nb or nb in na:
+        return True
+    wa, wb = set(na.split()), set(nb.split())
+    if not wa or not wb:
+        return False
+    overlap = len(wa & wb) / max(len(wa), len(wb))
+    return overlap >= 0.75
 
 
 def _parse_status_triplet(text: str) -> dict[str, str | None]:
@@ -1213,16 +1293,23 @@ def extract_back_fields(tokens: list[OcrToken]) -> tuple[dict[str, Any], list[st
 
     if job_candidates:
         job_candidates.sort(key=lambda x: x[0], reverse=True)
-        # Prefer joining top-scoring contiguous profession lines
         top = job_candidates[0][1]
-        extras = [
-            t
-            for s, t in job_candidates[1:3]
-            if s >= job_candidates[0][0] - 2.5
-            and normalize_ar(t) != normalize_ar(top)
-            and not _parse_status_triplet(t)["gender"]
-        ]
-        out["job"] = " ".join([top, *extras[:1]]).strip()
+        # Only append a second line when it's a real continuation (تخصص…),
+        # never a near-duplicate re-OCR of the same profession.
+        extra = None
+        for _s, t in job_candidates[1:3]:
+            if _jobs_near_duplicate(top, t):
+                continue
+            tn = normalize_ar(t)
+            if "تخصص" in tn or (
+                len(t) >= 6
+                and _arabic_ratio(t) >= 0.6
+                and not _parse_status_triplet(t)["gender"]
+            ):
+                extra = t
+                break
+        raw_job = f"{top} {extra}".strip() if extra else top
+        out["job"] = finalize_back_job(raw_job)
         notes.append("BACK: المهنة")
 
     for i, t in enumerate(usable):
@@ -2636,7 +2723,10 @@ def apply_field_rules(
                 if normalize_ar(str(fields["gender"])) != normalize_ar(str(v)):
                     rules_fired.append("BACK: نوع OCR مختلف عن معادلة الرقم — اعتُمدت المعادلة")
                 continue
-            fields[k] = v
+            if k == "job":
+                fields[k] = finalize_back_job(v)
+            else:
+                fields[k] = v
         rules_fired.extend(back_notes)
         if side == "unknown" and (
             back_fields.get("job")
@@ -2652,8 +2742,10 @@ def apply_field_rules(
         if not fields.get("job"):
             job = extract_value_after_label(tokens, ("المهنه", "المهنة", "مهنة"))
             if job:
-                fields["job"] = job
+                fields["job"] = finalize_back_job(job)
                 rules_fired.append("LABEL: المهنة")
+        else:
+            fields["job"] = finalize_back_job(fields.get("job"))
 
         if not fields.get("religion"):
             religion = extract_value_after_label(
@@ -3246,7 +3338,19 @@ class EgyptianIdExtractor:
                 apply_ocr_word_fixes(x)
                 for x in self._zone_lines(engine, ocr_card_enh, sy0, sy1, sx0, sx1)
             ]
-            expiry_zone = self._zone_lines(engine, ocr_card_enh, ey0, ey1, ex0, ex1)
+            expiry_zone = self._zone_lines(
+                engine, ocr_card_enh, ey0, ey1, ex0, ex1, scale=2.0, mode="text"
+            )
+            if not extract_expiry_date(expiry_zone):
+                expiry_zone = expiry_zone + self._zone_lines(
+                    engine, ocr_card_enh, ey0, ey1, ex0, ex1, scale=2.2, mode="digits"
+                )
+            # Also scan mid-band tokens (سارية حتى often sits just above barcode)
+            expiry_band_texts = [
+                t.text
+                for t in tokens
+                if 0.34 <= t.cy <= 0.68
+            ]
             zone_toks = merge_token_lists(
                 tokens,
                 self._zone_tokens(engine, ocr_card_enh, jy0, jy1, jx0, jx1, index_base=4000),
@@ -3281,46 +3385,58 @@ class EgyptianIdExtractor:
                     continue
                 if k == "national_id" and fields.get("national_id"):
                     continue
-                if k in {"job", "expiry_date", "marital_status", "religion", "gender", "husband_name"}:
+                if k == "job":
+                    fields[k] = finalize_back_job(v)
+                elif k in {"expiry_date", "marital_status", "religion", "gender", "husband_name"}:
                     fields[k] = v
                 elif not fields.get(k):
                     fields[k] = v
             rules.extend(notes2)
             rules.append("ZONE_BACK: قراءة مناطق الظهر (مهنة/حالة/سريان)")
 
-            # Job: prefer zone lines with profession hints
+            # Job: prefer a single clean zone line (no duplicate merge)
             if job_zone:
                 best_job = None
                 best_s = -1.0
                 for ln in job_zone:
-                    n = normalize_ar(ln)
-                    if len(ln) < 4:
+                    cleaned = finalize_back_job(ln)
+                    if not cleaned or len(cleaned) < 3:
                         continue
-                    st = _parse_status_triplet(ln)
+                    n = normalize_ar(cleaned)
+                    st = _parse_status_triplet(cleaned)
                     if sum(1 for v in st.values() if v) >= 2:
                         continue
-                    s = float(len(ln))
+                    s = float(len(cleaned))
                     if any(normalize_ar(h) in n for h in JOB_HINTS):
                         s += 20
                     if s > best_s:
                         best_s = s
-                        best_job = ln
-                if best_job and (
-                    not fields.get("job")
-                    or (
-                        any(normalize_ar(h) in normalize_ar(best_job) for h in JOB_HINTS)
-                        and not any(
-                            normalize_ar(h) in normalize_ar(str(fields.get("job") or ""))
-                            for h in JOB_HINTS
-                        )
-                    )
-                ):
-                    fields["job"] = best_job
+                        best_job = cleaned
+                if best_job:
+                    cur = fields.get("job")
+                    if not cur or _jobs_near_duplicate(str(cur), best_job):
+                        fields["job"] = best_job
+                    elif any(normalize_ar(h) in normalize_ar(best_job) for h in JOB_HINTS) and not any(
+                        normalize_ar(h) in normalize_ar(str(cur)) for h in JOB_HINTS
+                    ):
+                        fields["job"] = best_job
+
+            fields["job"] = finalize_back_job(fields.get("job"))
 
             if not fields.get("expiry_date"):
-                exp = extract_expiry_date(expiry_zone + status_zone + job_zone)
+                exp = extract_expiry_date(
+                    expiry_zone + expiry_band_texts + status_zone + job_zone
+                    + [t.text for t in tokens if t.cy <= 0.70]
+                )
                 if exp:
                     fields["expiry_date"] = exp
+                    rules.append(f"ZONE_EXPIRY: سريان ← {exp}")
+            else:
+                # Re-check zone in case early parse was empty/wrong
+                exp2 = extract_expiry_date(expiry_zone + expiry_band_texts)
+                if exp2 and exp2 != fields.get("expiry_date"):
+                    fields["expiry_date"] = exp2
+                    rules.append(f"ZONE_EXPIRY: تحديث السريان ← {exp2}")
 
             # Status band: parse gender/religion/marital explicitly
             for ln in status_zone + job_zone:
