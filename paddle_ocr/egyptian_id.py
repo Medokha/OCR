@@ -43,10 +43,10 @@ ID_ZONES: dict[str, dict[str, tuple[float, float, float, float]]] = {
         "face": (0.02, 0.08, 0.30, 0.58),
         # الهيدر الأخضر
         "header": (0.38, 0.02, 0.96, 0.22),
-        # الاسم سطرين — يغطي تخطيط البطاقة القديمة والجديدة
-        "name": (0.42, 0.22, 0.98, 0.46),
-        # العنوان سطرين تحت الاسم مباشرة
-        "address": (0.45, 0.44, 0.98, 0.66),
+        # الاسم سطرين — تحت الهيدر (لا يتداخل مع «بطاقة تحقيق الشخصية»)
+        "name": (0.42, 0.28, 0.98, 0.46),
+        # العنوان سطرين — فوق الرقم القومي فقط
+        "address": (0.45, 0.46, 0.98, 0.68),
         # الرقم القومي
         "national_id": (0.38, 0.70, 0.97, 0.86),
         # رقم المصنع
@@ -820,6 +820,122 @@ def apply_ocr_word_fixes(text: str) -> str:
         nw = normalize_ar(w)
         parts.append(OCR_WORD_FIXES.get(nw, w))
     return " ".join(parts).strip()
+
+
+_ID_HEADER_WORDS = {
+    normalize_ar(w)
+    for w in (
+        "بطاقة",
+        "بطاقه",
+        "تحقيق",
+        "الشخصية",
+        "الشخصيه",
+        "شخصية",
+        "شخصيه",
+        "جمهورية",
+        "جمهوريه",
+        "مصر",
+        "العربية",
+        "العربيه",
+        "وزارة",
+        "وزاره",
+        "الداخلية",
+        "الداخليه",
+    )
+}
+
+
+def _contains_id_header(text: str) -> bool:
+    n = normalize_ar(text)
+    if any(k in n for k in ("بطاق", "تحقيق", "شخص", "جمهور", "وزاره", "داخليه")):
+        return True
+    return any(normalize_ar(w) in _ID_HEADER_WORDS for w in (text or "").split())
+
+
+def finalize_front_name(text: str | None) -> str | None:
+    """Drop card title/header words; keep person-name tokens only."""
+    if not text:
+        return None
+    text = apply_ocr_word_fixes(_strip_embedded_header(text))
+    kept: list[str] = []
+    for w in text.split():
+        nw = normalize_ar(w)
+        if nw in _ID_HEADER_WORDS:
+            continue
+        if "بطاق" in nw or "تحقيق" in nw or "شخص" in nw or "جمهور" in nw:
+            continue
+        if _has_ocr_garbage(w):
+            continue
+        kept.append(w)
+    out = " ".join(kept).strip()
+    if not out or len(normalize_ar(out)) < 2:
+        return None
+    # Reject if still mostly header (e.g. «تحقيق الشخصية عوض الله» without first name)
+    if _contains_id_header(out):
+        out2 = " ".join(
+            w
+            for w in kept
+            if not any(k in normalize_ar(w) for k in ("تحقيق", "شخص", "بطاق"))
+        ).strip()
+        out = out2 or None
+    return out
+
+
+def finalize_front_address(
+    text: str | None,
+    *,
+    national_id: str | None = None,
+) -> str | None:
+    """Remove NID bleed, latin junk, and repeated place tokens."""
+    if not text:
+        return None
+    text = apply_ocr_word_fixes(_strip_address_label_prefix(text))
+    nid_digits = _digit_soup(national_id or "")
+    words: list[str] = []
+    for w in text.split():
+        if not w.strip():
+            continue
+        if re.fullmatch(r"[A-Za-z]{1,3}", w):
+            continue
+        if len(_digit_soup(w)) >= 6:
+            continue
+        if nid_digits and nid_digits in _digit_soup(w):
+            continue
+        if _has_ocr_garbage(w) and not _looks_like_address(w):
+            continue
+        words.append(w)
+    # De-dupe normalized tokens (اشمون المنوفية … اشمون المنوفية)
+    seen: set[str] = set()
+    deduped: list[str] = []
+    for w in words:
+        nw = normalize_ar(w)
+        if not nw or nw in seen:
+            continue
+        if any(nw in s and nw != s for s in seen):
+            continue
+        seen.add(nw)
+        deduped.append(w)
+    out = " ".join(deduped).strip()
+    out = re.sub(r"\s+", " ", out)
+    if len(_digit_soup(out)) >= 10:
+        return None
+    return out or None
+
+
+def _effective_name_box(tokens: list[OcrToken]) -> tuple[float, float, float, float]:
+    x0, y0, x1, y1 = ID_ZONES["front"]["name"]
+    if tokens:
+        y0 = max(y0, _header_bottom_y(tokens) + 0.012)
+    return (x0, max(y0, 0.26), x1, y1)
+
+
+def _effective_address_box(tokens: list[OcrToken]) -> tuple[float, float, float, float]:
+    ax0, ay0, ax1, ay1 = ID_ZONES["front"]["address"]
+    _, ny0, _, ny1 = _effective_name_box(tokens) if tokens else ID_ZONES["front"]["name"]
+    ay0 = max(ay0, ny1 + 0.008)
+    nid_top = ID_ZONES["front"]["national_id"][1]
+    ay1 = min(ay1, nid_top - 0.02)
+    return (ax0, ay0, ax1, max(ay1, ay0 + 0.08))
 
 
 def _match_known_value(text: str, values: tuple[str, ...]) -> str | None:
@@ -2039,6 +2155,8 @@ def _name_field_score(text: str | None) -> float:
         score -= 4.0
     if _is_header_noise(text):
         score -= 5.0
+    if _contains_id_header(text):
+        score -= 15.0
     score += min(len(words), 6) * 0.6
     score += _arabic_ratio(text) * 2.0
     return score
@@ -2064,6 +2182,8 @@ def _address_field_score(text: str | None) -> float:
     latin = sum(1 for c in text if "a" <= c.lower() <= "z")
     if latin >= 2:
         score -= 4.0
+    if len(_digit_soup(text)) >= 10:
+        score -= 12.0
     # Scrambled zone OCR often dumps too many words
     if len(words) > 12:
         score -= 3.0
@@ -2082,6 +2202,10 @@ def _choose_better_field(
     if not b:
         return a
     if kind == "name":
+        if _contains_id_header(a) and not _contains_id_header(b):
+            return b
+        if _contains_id_header(b) and not _contains_id_header(a):
+            return a
         sa, sb = _name_field_score(a), _name_field_score(b)
     else:
         sa, sb = _address_field_score(a), _address_field_score(b)
@@ -2134,16 +2258,16 @@ def pick_best_front_zones(
     """
     _ = face_box
     notes: list[str] = []
-    name_box = ID_ZONES["front"]["name"]
-    addr_box = ID_ZONES["front"]["address"]
+    name_box = _effective_name_box(tokens or [])
+    addr_box = _effective_address_box(tokens or [])
     notes.append(f"ZONE_NAME=exact{name_box}")
     notes.append(f"ZONE_ADDR=exact{addr_box}")
 
     name_lines: list[str] = []
     addr_lines: list[str] = []
     if tokens:
-        name_lines = _lines_from_tokens_in_box(tokens, name_box, kind="name", pad=0.025)
-        addr_lines = _lines_from_tokens_in_box(tokens, addr_box, kind="address", pad=0.02)
+        name_lines = _lines_from_tokens_in_box(tokens, name_box, kind="name", pad=0.02)
+        addr_lines = _lines_from_tokens_in_box(tokens, addr_box, kind="address", pad=0.015)
         if name_lines:
             notes.append(f"TOK_NAME← {' || '.join(name_lines)}")
         if addr_lines:
@@ -2658,7 +2782,9 @@ class EgyptianIdExtractor:
             best_name = _choose_better_field(seq_name, z_name, kind="name")
             best_addr = _choose_better_field(seq_addr, z_addr, kind="address")
 
-            # OnnxTR as fill-in only when a field is weak/missing
+            o_name: str | None = None
+            o_addr: str | None = None
+            # OnnxTR: village fill only — never replace full name/address
             if onnx_tokens:
                 o_name, o_addr, o_notes = pick_best_front_zones(
                     engine,
@@ -2668,15 +2794,14 @@ class EgyptianIdExtractor:
                     tokens=onnx_tokens,
                 )
                 rules.extend([f"ONNXTR_{n}" if not n.startswith("ONNX") else n for n in o_notes[:6]])
-                if _name_field_score(o_name) > _name_field_score(best_name) + 1.5:
-                    best_name = o_name
-                    rules.append("ONNXTR_WIN: اسم")
-                if _address_field_score(o_addr) > _address_field_score(best_addr) + 0.8:
-                    best_addr = o_addr
-                    rules.append("ONNXTR_WIN: عنوان")
-                elif o_addr and best_addr:
-                    # Merge missing village/place word from OnnxTR into paddle address
-                    for w in o_addr.split():
+                o_name = finalize_front_name(o_name)
+                o_addr = finalize_front_address(o_addr, national_id=fields.get("national_id"))
+                if o_name and _name_field_score(o_name) > _name_field_score(best_name) + 3.0:
+                    if not _contains_id_header(o_name):
+                        best_name = o_name
+                        rules.append("ONNXTR_WIN: اسم (مُصفّى)")
+                if o_addr and best_addr:
+                    for w in (o_addr or "").split():
                         nw = normalize_ar(w)
                         if not nw or len(nw) < 3:
                             continue
@@ -2686,30 +2811,52 @@ class EgyptianIdExtractor:
                             continue
                         if nw in normalize_ar(best_addr):
                             continue
-                        # Only prepend clean single-token place/village names
                         if (
                             len(nw.split()) == 1
                             and _arabic_ratio(w) >= 0.8
                             and not _is_strong_address_start(w)
                             and (
                                 nw in ADDRESS_PLACE_WORDS
-                                or (_looks_like_person_name(w) and not any(
-                                    normalize_ar(x) == nw
-                                    for x in (best_name or "").split()
-                                ))
+                                or (
+                                    _looks_like_person_name(w)
+                                    and not any(
+                                        normalize_ar(x) == nw for x in (best_name or "").split()
+                                    )
+                                )
                             )
                         ):
                             best_addr = f"{w} {best_addr}".strip()
                             rules.append(f"ONNXTR_FILL: {w}")
                             break
 
+            best_name = finalize_front_name(best_name)
+            best_addr = finalize_front_address(
+                best_addr, national_id=fields.get("national_id")
+            )
+            # Fallback chain if sanitization wiped a bad pick
+            if not best_name:
+                for cand in (z_name, seq_name, o_name if onnx_tokens else None):
+                    best_name = finalize_front_name(cand)
+                    if best_name:
+                        break
+            if not best_addr:
+                for cand in (z_addr, seq_addr, o_addr if onnx_tokens else None):
+                    best_addr = finalize_front_address(
+                        cand, national_id=fields.get("national_id")
+                    )
+                    if best_addr:
+                        break
+
             best_addr = _scrub_name_bleed_from_address(best_addr, best_name)
+            best_addr = finalize_front_address(
+                best_addr, national_id=fields.get("national_id")
+            )
 
             if best_name:
-                fields["full_name"] = apply_ocr_word_fixes(best_name)
+                fields["full_name"] = best_name
                 rules.append("ZONE_MERGE: الاسم (تسلسل OCR + مناطق)")
             if best_addr:
-                fields["address"] = apply_ocr_word_fixes(best_addr)
+                fields["address"] = best_addr
                 rules.append("ZONE_MERGE: العنوان (تسلسل OCR + مناطق)")
 
             # Dedicated NID digits pass if missing
@@ -3009,7 +3156,12 @@ FIELD_TO_ZONE: dict[str, tuple[str, str]] = {
 }
 
 
-def zone_box_for_field(field_key: str, side: str) -> tuple[float, float, float, float] | None:
+def zone_box_for_field(
+    field_key: str,
+    side: str,
+    *,
+    tokens: list[OcrToken] | None = None,
+) -> tuple[float, float, float, float] | None:
     mapping = FIELD_TO_ZONE.get(field_key)
     if not mapping:
         return None
@@ -3018,6 +3170,11 @@ def zone_box_for_field(field_key: str, side: str) -> tuple[float, float, float, 
         return None
     if side == "back" and z_side != "back":
         return None
+    if z_side == "front" and tokens:
+        if z_name == "name":
+            return _effective_name_box(tokens)
+        if z_name == "address":
+            return _effective_address_box(tokens)
     return ID_ZONES.get(z_side, {}).get(z_name)
 
 
@@ -3030,7 +3187,6 @@ def build_field_crops(
     side: str = "front",
 ) -> dict[str, Any]:
     """Crop + annotate using fixed ID_ZONES (same boxes as layout overlay)."""
-    _ = tokens  # zones are layout-fixed; OCR tokens not used for boxes
     crop_keys_front = ["full_name", "address", "national_id"]
     crop_keys_back = [
         "job",
@@ -3046,7 +3202,9 @@ def build_field_crops(
     meta: dict[str, Any] = {}
 
     for key in crop_keys:
-        box = zone_box_for_field(key, "front" if side != "back" else "back")
+        box = zone_box_for_field(
+            key, "front" if side != "back" else "back", tokens=tokens
+        )
         if box is None:
             continue
         roi = crop_norm_region(card, box)
