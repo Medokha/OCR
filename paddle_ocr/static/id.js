@@ -48,7 +48,7 @@
     ["expiry_date", "سريان البطاقة حتى"],
   ];
 
-  const FRONT_CROPS = ["full_name", "address", "national_id"];
+  const FRONT_CROPS = ["full_name", "address", "national_id", "birth_date"];
   const BACK_CROPS = [
     "job",
     "religion",
@@ -63,6 +63,7 @@
     full_name: "منطقة الاسم",
     address: "منطقة العنوان / محل الإقامة",
     national_id: "منطقة الرقم القومي",
+    birth_date: "منطقة تاريخ الميلاد",
     job: "منطقة المهنة",
     religion: "منطقة الديانة",
     marital_status: "منطقة الحالة الاجتماعية",

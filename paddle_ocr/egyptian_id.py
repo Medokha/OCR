@@ -47,8 +47,10 @@ ID_ZONES: dict[str, dict[str, tuple[float, float, float, float]]] = {
         "name": (0.42, 0.24, 0.98, 0.46),
         # العنوان سطرين — فوق الرقم القومي فقط
         "address": (0.45, 0.46, 0.98, 0.68),
-        # الرقم القومي
-        "national_id": (0.38, 0.70, 0.97, 0.86),
+        # الرقم القومي — شريط الأرقام السفلي يمينًا (بدون يسار زيادة)
+        "national_id": (0.34, 0.70, 0.98, 0.88),
+        # تاريخ الميلاد المطبوع — سطر خفيف تحت الصورة فوق النسر
+        "birth_date": (0.02, 0.64, 0.38, 0.78),
         # رقم المصنع
         "serial": (0.04, 0.87, 0.35, 0.98),
     },
@@ -71,6 +73,7 @@ ID_ZONE_COLORS: dict[str, tuple[int, int, int]] = {
     "name": (40, 140, 80),
     "address": (180, 110, 40),
     "national_id": (40, 40, 220),
+    "birth_date": (200, 80, 160),
     "serial": (160, 160, 160),
     "job": (40, 140, 80),
     "status": (180, 110, 40),
@@ -350,6 +353,59 @@ def decode_national_id(nid: str) -> dict[str, Any]:
     }
 
 
+def extract_printed_birth_date(texts: list[str]) -> str | None:
+    """Parse DOB printed under the photo (YYYY/MM/DD or DD/MM/YYYY)."""
+    candidates: list[str] = []
+    for text in texts:
+        ascii_t = to_ascii_digits(text or "")
+        if not ascii_t:
+            continue
+        # Normalize common OCR junk around the date
+        ascii_t = (
+            ascii_t.replace("\\", "/")
+            .replace("|", "/")
+            .replace(",", "/")
+            .replace(" ", "")
+        )
+        for m in re.finditer(
+            r"(19\d{2}|20\d{2})\s*[/\-.\u066B\u066C]?\s*(\d{1,2})\s*[/\-.\u066B\u066C]?\s*(\d{1,2})",
+            ascii_t,
+        ):
+            y, mo, d = int(m.group(1)), int(m.group(2)), int(m.group(3))
+            if 1 <= mo <= 12 and 1 <= d <= 31:
+                candidates.append(f"{y:04d}-{mo:02d}-{d:02d}")
+        for m in re.finditer(
+            r"(\d{1,2})\s*[/\-.\u066B\u066C]?\s*(\d{1,2})\s*[/\-.\u066B\u066C]?\s*(19\d{2}|20\d{2})",
+            ascii_t,
+        ):
+            a, b, y = int(m.group(1)), int(m.group(2)), int(m.group(3))
+            if a <= 31 and 1 <= b <= 12:
+                candidates.append(f"{y:04d}-{b:02d}-{a:02d}")
+            elif b <= 31 and 1 <= a <= 12:
+                candidates.append(f"{y:04d}-{a:02d}-{b:02d}")
+        # Spaced: 2000 09 20
+        for m in re.finditer(
+            r"(19\d{2}|20\d{2})\s+(\d{1,2})\s+(\d{1,2})",
+            to_ascii_digits(text or ""),
+        ):
+            y, mo, d = int(m.group(1)), int(m.group(2)), int(m.group(3))
+            if 1 <= mo <= 12 and 1 <= d <= 31:
+                candidates.append(f"{y:04d}-{mo:02d}-{d:02d}")
+        digits = _digit_soup(ascii_t)
+        if len(digits) >= 8:
+            for i in range(0, len(digits) - 7):
+                chunk = digits[i : i + 8]
+                if chunk[:2] in {"19", "20"}:
+                    y, mo, d = int(chunk[:4]), int(chunk[4:6]), int(chunk[6:8])
+                    if 1 <= mo <= 12 and 1 <= d <= 31:
+                        candidates.append(f"{y:04d}-{mo:02d}-{d:02d}")
+    if not candidates:
+        return None
+    from collections import Counter
+
+    return Counter(candidates).most_common(1)[0][0]
+
+
 def _encode_image_b64(image_bgr: np.ndarray, quality: int = 90) -> str:
     ok, buf = cv2.imencode(".jpg", image_bgr, [int(cv2.IMWRITE_JPEG_QUALITY), quality])
     if not ok:
@@ -457,18 +513,19 @@ def prepare_zone_roi(
         return []
     h, w = roi.shape[:2]
     target = max(h, w) * scale
-    if target > 900:
-        scale = 900 / max(h, w)
-    scale = max(1.25, min(scale, 2.2))
+    if target > 1000:
+        scale = 1000 / max(h, w)
+    scale = max(1.25, min(scale, 2.6 if mode == "digits" else 2.2))
     big = cv2.resize(roi, None, fx=scale, fy=scale, interpolation=cv2.INTER_CUBIC)
     enhanced = enhance_id_card(big)
     if mode == "digits":
+        # Soft prep only — harsh threshold kills DOB over the eagle watermark
         gray = cv2.cvtColor(enhanced, cv2.COLOR_BGR2GRAY)
-        gray = cv2.GaussianBlur(gray, (3, 3), 0)
-        thr = cv2.adaptiveThreshold(
-            gray, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY, 31, 8
-        )
-        return [enhanced, cv2.cvtColor(thr, cv2.COLOR_GRAY2BGR)]
+        clahe = cv2.createCLAHE(clipLimit=2.5, tileGridSize=(8, 8)).apply(gray)
+        return [
+            enhanced,
+            cv2.cvtColor(clahe, cv2.COLOR_GRAY2BGR),
+        ]
     # Text: enhanced only (raw+enhanced doubled OCR and fragmented Arabic)
     return [enhanced]
 
@@ -1190,43 +1247,211 @@ def _digit_soup(text: str) -> str:
 
 
 def find_national_id_from_tokens(tokens: list[OcrToken]) -> str | None:
-    # 1) Exact 14 in any token / joined
     texts = [t.text for t in tokens]
-    joined = " ".join(texts)
-    for m in re.findall(r"[23][\dOoIl|]{13}", to_ascii_digits(joined)):
-        cand = _digit_soup(m)
-        if len(cand) == 14 and cand[0] in "23":
-            decoded = decode_national_id(cand)
-            if decoded.get("valid"):
-                return cand
+    direct = best_national_id_from_texts(texts)
+    if direct:
+        return direct
+    bottom = [t for t in tokens if t.cy >= 0.65]
+    if bottom:
+        return best_national_id_from_texts([t.text for t in bottom])
+    return None
 
-    # 2) Bottom-zone tokens (NID is near bottom of front)
-    bottom = [t for t in tokens if t.cy >= 0.72]
-    bottom_digits = _digit_soup("".join(t.text for t in bottom))
-    m = re.search(r"[23]\d{13}", bottom_digits)
-    if m:
-        return m.group(0)
 
-    # 3) Sliding window over all digits
-    all_digits = _digit_soup(joined)
-    best = None
-    best_score = -1
-    for i in range(0, max(0, len(all_digits) - 13)):
-        cand = all_digits[i : i + 14]
-        if cand[0] not in "23":
-            continue
-        decoded = decode_national_id(cand)
-        score = 0
-        if decoded.get("valid"):
-            score += 3
-        if decoded.get("checksum_ok"):
+def score_national_id_candidate(cand: str) -> int:
+    cand = _digit_soup(cand)
+    if len(cand) != 14 or cand[0] not in "23":
+        return -1
+    decoded = decode_national_id(cand)
+    # Must decode to a real calendar date — checksum alone is not enough
+    if not decoded.get("valid") or not decoded.get("birth_date"):
+        return -1
+    # Require checksum so garbled OCR cannot invent a plausible DOB
+    if not decoded.get("checksum_ok"):
+        return 1
+    score = 11
+    gov = GOVERNORATES.get(cand[7:9])
+    if gov and gov != "غير معروف":
+        score += 2
+    # Prefer more recent births when checksum+age already match (breaks 1950 vs 2000 ties)
+    year = decoded.get("birth_year")
+    if isinstance(year, int):
+        age = 2026 - year
+        if 5 <= age <= 90:
+            score += 4
+        elif 1 <= age <= 100:
             score += 2
-        if GOVERNORATES.get(cand[7:9]):
+        elif age > 110 or age < 0:
+            score -= 6
+        if year >= 1990:
+            score += 2
+        elif year >= 1970:
             score += 1
-        if score > best_score:
-            best_score = score
-            best = cand
-    return best if best_score >= 3 else best
+    return score
+
+
+def recover_national_id_from_fragments(texts: list[str]) -> str | None:
+    """Complete truncated NID OCR (often missing leading century/year digits)."""
+    best: str | None = None
+    best_score = -1
+    blobs: list[str] = []
+    for t in texts:
+        d = _digit_soup(t)
+        if 8 <= len(d) <= 16:
+            blobs.append(d)
+    joined = _digit_soup(" ".join(texts))
+    if 8 <= len(joined) <= 32:
+        blobs.append(joined)
+
+    seen: set[str] = set()
+    # Hint from individual OCR lines only (joined soup may start with a wrong ID)
+    century_hint = None
+    hint_len = 0
+    for t in texts:
+        d = _digit_soup(t)
+        if d and d[0] in "23" and len(d) > hint_len:
+            century_hint = d[0]
+            hint_len = len(d)
+
+    def consider(cand: str) -> None:
+        nonlocal best, best_score
+        if cand in seen or len(cand) != 14 or cand[0] not in "23":
+            return
+        seen.add(cand)
+        s = score_national_id_candidate(cand)
+        if century_hint and cand[0] == century_hint:
+            s += 3
+        if s > best_score:
+            best_score, best = s, cand
+
+    for blob in blobs:
+        # Substrings: OCR often prepends garbage digits (15–16 chars)
+        parts = [blob]
+        if len(blob) > 14:
+            for L in (14, 13, 12, 11, 10):
+                for i in range(0, len(blob) - L + 1):
+                    parts.append(blob[i : i + L])
+        for part in parts:
+            # Exact / sliding 14
+            if len(part) >= 14:
+                for i in range(0, len(part) - 13):
+                    consider(part[i : i + 14])
+            # Truncated: try inserting one missing digit (13→14)
+            if len(part) == 13:
+                for pos in range(14):
+                    for d in "0123456789":
+                        consider(part[:pos] + d + part[pos:])
+            # Truncated: try prepending digits so result is a valid checksum NID
+            if 10 <= len(part) <= 13:
+                missing = 14 - len(part)
+                centuries = (
+                    (century_hint,) if century_hint in {"2", "3"} else ("3", "2")
+                )
+                if missing == 1:
+                    prefixes = (
+                        [century_hint]
+                        if century_hint in {"2", "3"}
+                        else [str(d) for d in range(10)]
+                    )
+                elif missing == 2:
+                    prefixes = [f"{a}{b}" for a in centuries for b in range(10)]
+                elif missing == 3:
+                    prefixes = []
+                    for a in centuries:
+                        years = range(0, 30) if a == "3" else range(50, 100)
+                        prefixes.extend(f"{a}{b:02d}" for b in years)
+                        rest = range(30, 100) if a == "3" else range(0, 50)
+                        prefixes.extend(f"{a}{b:02d}" for b in rest)
+                else:
+                    prefixes = []
+                    for a in centuries:
+                        for b in list(range(0, 30)) + list(range(30, 100)):
+                            for c in range(10):
+                                prefixes.append(f"{a}{b:02d}{c}")
+                for pref in prefixes:
+                    consider(pref + part)
+            # Truncated from the right (less common)
+            if 11 <= len(part) <= 13 and part[0] in "23":
+                missing = 14 - len(part)
+                if missing <= 2:
+                    for tail in range(10**missing):
+                        consider(part + f"{tail:0{missing}d}")
+        # Also: drop one garbage digit from 15-digit OCR
+        if len(blob) == 15:
+            for i in range(15):
+                consider(blob[:i] + blob[i + 1 :])
+    return best if best_score >= 11 else None
+
+
+def best_national_id_from_texts(texts: list[str]) -> str | None:
+    """Pick the best 14-digit NID from OCR lines (valid date + checksum)."""
+    blob = _digit_soup(" ".join(texts))
+    century_hint = None
+    hint_len = 0
+    for t in texts:
+        d = _digit_soup(t)
+        if len(d) >= 11 and d[0] in "23" and len(d) > hint_len:
+            century_hint = d[0]
+            hint_len = len(d)
+    if century_hint is None and blob and blob[0] in "23":
+        century_hint = blob[0]
+
+    best: str | None = None
+    best_score = -1
+
+    def consider(cand: str, bonus: int = 0) -> None:
+        nonlocal best, best_score
+        s = score_national_id_candidate(cand)
+        if s < 11:
+            return
+        if century_hint and cand[0] == century_hint:
+            s += 3
+        elif century_hint and cand[0] != century_hint:
+            s -= 2
+        s += bonus
+        if s > best_score:
+            best_score, best = s, cand
+
+    # Prefer recovery from over-long strip OCR (15–16 digits) — beats false exact-14 soup
+    for t in texts:
+        d = _digit_soup(t)
+        if 15 <= len(d) <= 16:
+            rec = recover_national_id_from_fragments([t])
+            if rec:
+                consider(rec, bonus=4)
+
+    for t in texts:
+        d = _digit_soup(t)
+        if len(d) == 14 and d[0] in "23":
+            consider(d)
+    for i in range(0, max(0, len(blob) - 13)):
+        cand = blob[i : i + 14]
+        if cand[0] in "23":
+            consider(cand)
+    recovered = recover_national_id_from_fragments(texts)
+    if recovered:
+        consider(recovered, bonus=2)
+    return best if best_score >= 11 else None
+
+
+def birth_date_zone_box(
+    face_box: tuple[float, float, float, float] | None = None,
+) -> tuple[float, float, float, float]:
+    """DOB sits under the personal photo on the left of Egyptian ID front."""
+    fallback = ID_ZONES["front"]["birth_date"]
+    # Portrait frame from layout is more stable than YuNet (often crops chin only)
+    layout_face = ID_ZONES["front"]["face"]
+    fy1_layout = layout_face[3]
+    if not face_box:
+        return fallback
+    fx0, _fy0, fx1, fy1 = face_box
+    fy1 = max(fy1, fy1_layout - 0.02)
+    x0 = max(0.02, min(fx0, layout_face[0]) - 0.01)
+    x1 = min(0.45, max(fx1 + 0.08, 0.36))
+    y0 = max(0.55, min(0.66, fy1 - 0.01))
+    y1 = min(0.80, y0 + 0.18)
+    if y1 - y0 < 0.08:
+        return fallback
+    return (x0, y0, x1, y1)
 
 
 def _has_ocr_garbage(text: str) -> bool:
@@ -2387,7 +2612,15 @@ def apply_field_rules(
         )
     elif nid:
         fields["national_id"] = nid
-        rules_fired.append("COND: عُثر على 14 رقم لكن فك التاريخ فشل")
+        soft = decode_national_id(nid)
+        if soft.get("birth_date"):
+            fields["birth_date"] = soft["birth_date"]
+            fields["governorate"] = soft.get("governorate") or fields.get("governorate")
+            fields["gender"] = soft.get("gender") or fields.get("gender")
+            decoded = soft
+            rules_fired.append("EQ_SOFT: تاريخ الميلاد من الرقم القومي")
+        else:
+            rules_fired.append("COND: عُثر على 14 رقم لكن فك التاريخ فشل")
 
     # FRONT: name + address
     if side != "back":
@@ -2558,8 +2791,8 @@ class EgyptianIdExtractor:
         y0, y1 = int(h * ny0), int(h * ny1)
         strip = card[y0:y1, int(w * nx0) : int(w * nx1)]
         if strip.size:
-            strip_big = cv2.resize(strip, None, fx=1.6, fy=1.6, interpolation=cv2.INTER_CUBIC)
-            blocks_c = engine.ocr_bgr(strip_big, enhance=enhance_handwriting)
+            strip_big = cv2.resize(strip, None, fx=2.4, fy=2.4, interpolation=cv2.INTER_CUBIC)
+            blocks_c = engine.ocr_bgr(strip_big, enhance=False)
             # Remap y into full-card normalized space roughly
             tokens_c: list[OcrToken] = []
             sh, sw = strip_big.shape[:2]
@@ -2699,6 +2932,46 @@ class EgyptianIdExtractor:
             )
         return out
 
+    def _read_national_id_lines(
+        self,
+        engine: Any,
+        card: np.ndarray,
+    ) -> list[str]:
+        """One tight upscaled NID strip + optional OnnxTR — avoid multi-variant crashes."""
+        box = ID_ZONES["front"]["national_id"]
+        # Slightly tighter classic band (leading digits live near mid-right)
+        classic = (max(0.34, box[0]), 0.70, 0.98, 0.88)
+        lines: list[str] = []
+        for zone in (classic, box):
+            roi = crop_norm_region(card, zone, min_h=32)
+            if roi is None or not roi.size:
+                continue
+            big = cv2.resize(roi, None, fx=2.5, fy=2.5, interpolation=cv2.INTER_CUBIC)
+            try:
+                blocks = engine.ocr_bgr(big, enhance=False)
+                lines.extend(str(b.text or "").strip() for b in blocks if str(b.text or "").strip())
+            except Exception:  # noqa: BLE001
+                logger.debug("NID paddle strip failed", exc_info=True)
+            # Secondary engine — often better on Indic digits
+            try:
+                import os
+
+                if os.environ.get("OCR_SKIP_ONNXTR", "").strip() in {"1", "true", "yes"}:
+                    pass
+                else:
+                    from arabic_onnxtr import ArabicOnnxTrEngine
+
+                    if ArabicOnnxTrEngine.available():
+                        for b in ArabicOnnxTrEngine.get().ocr_bgr(big):
+                            t = str(b.get("text") or "").strip()
+                            if t:
+                                lines.append(t)
+            except Exception:  # noqa: BLE001
+                logger.debug("NID OnnxTR strip failed", exc_info=True)
+            if best_national_id_from_texts(lines):
+                break
+        return [ln for ln in lines if ln]
+
     def process_image_path(
         self,
         image_path: str | Path,
@@ -2767,9 +3040,14 @@ class EgyptianIdExtractor:
         onnx_tokens: list[OcrToken] = []
         onnx_notes: list[str] = []
         try:
-            onnx_tokens = self._onnxtr_tokens(ocr_card_enh, index_base=7000)
-            if onnx_tokens:
-                onnx_notes.append(f"ONNXTR: {len(onnx_tokens)} توكن ثانوي (منفصل)")
+            import os
+
+            if os.environ.get("OCR_SKIP_ONNXTR", "").strip() in {"1", "true", "yes"}:
+                onnx_notes.append("ONNXTR: skipped")
+            else:
+                onnx_tokens = self._onnxtr_tokens(ocr_card_enh, index_base=7000)
+                if onnx_tokens:
+                    onnx_notes.append(f"ONNXTR: {len(onnx_tokens)} توكن ثانوي (منفصل)")
         except Exception:  # noqa: BLE001
             logger.debug("OnnxTR secondary OCR skipped", exc_info=True)
             onnx_notes.append("ONNXTR: غير متاح / تخطي")
@@ -2878,27 +3156,94 @@ class EgyptianIdExtractor:
                 fields["address"] = best_addr
                 rules.append("ZONE_MERGE: العنوان (تسلسل OCR + مناطق)")
 
-            # Dedicated NID digits pass if missing
-            if not fields.get("national_id"):
-                nx0, ny0, nx1, ny1 = pad_zone(ID_ZONES["front"]["national_id"], 0.02)
-                nid_lines = self._zone_lines(
-                    engine, ocr_card_enh, ny0, ny1, nx0, nx1, scale=2.0, mode="digits"
+            # NID strip: prefer ORIGINAL (DeepLab warp often corrupts leading digits)
+            nid_base = original
+            nh, nw = nid_base.shape[:2]
+            if max(nh, nw) > 1000:
+                ns = 1000 / max(nh, nw)
+                nid_base = cv2.resize(
+                    nid_base,
+                    (int(nw * ns), int(nh * ns)),
+                    interpolation=cv2.INTER_AREA,
                 )
-                nid = find_national_id_from_tokens(
-                    [
-                        OcrToken(9000 + i, ln, 0.9, nx0, ny0, nx1, ny1)
-                        for i, ln in enumerate(nid_lines)
-                    ]
+            nid_lines = self._read_national_id_lines(engine, enhance_id_card(nid_base))
+            if not best_national_id_from_texts(nid_lines):
+                nid_lines += self._read_national_id_lines(engine, ocr_card)
+            nid = best_national_id_from_texts(nid_lines + [t.text for t in tokens])
+            if not nid:
+                nid = find_national_id_from_tokens(tokens)
+            if nid and score_national_id_candidate(nid) >= 11:
+                prev = fields.get("national_id")
+                if prev and str(prev) != nid:
+                    rules.append(f"NID_REPLACE: {prev} ← {nid}")
+                fields["national_id"] = nid
+                decoded2 = decode_national_id(nid)
+                if decoded2.get("birth_date"):
+                    decoded = decoded2
+                    fields["birth_date"] = decoded2.get("birth_date")
+                    fields["governorate"] = decoded2.get("governorate") or fields.get(
+                        "governorate"
+                    )
+                    fields["gender"] = decoded2.get("gender") or fields.get("gender")
+                    rules.append(
+                        f"ZONE_NID: {fields['national_id']} → ميلاد {fields.get('birth_date')}"
+                    )
+            elif fields.get("national_id") and score_national_id_candidate(
+                str(fields["national_id"])
+            ) < 11:
+                rules.append(f"NID_CLEAR: رفض {fields.get('national_id')}")
+                fields["national_id"] = None
+                fields["birth_date"] = None
+                fields["governorate"] = None
+                fields["gender"] = None
+
+            # Printed DOB under photo — only if equation DOB still missing
+            # (print is faint over eagle watermark; extra OCR often crashes Paddle on Win)
+            dob_box = birth_date_zone_box(face_box)
+            dob_lines: list[str] = []
+            if not fields.get("birth_date"):
+                bx0, by0, bx1, by1 = pad_zone(dob_box, 0.01)
+                dob_lines = self._zone_lines(
+                    engine, ocr_card_enh, by0, by1, bx0, bx1, scale=2.0, mode="text"
                 )
-                if nid:
-                    fields["national_id"] = nid
-                    decoded2 = decode_national_id(nid)
-                    if decoded2.get("valid"):
-                        decoded = decoded2
-                        fields["birth_date"] = decoded2.get("birth_date")
-                        fields["governorate"] = decoded2.get("governorate")
-                        fields["gender"] = decoded2.get("gender")
-                    rules.append("ZONE_NID: الرقم القومي من منطقة national_id")
+                printed_dob = extract_printed_birth_date(dob_lines)
+                if printed_dob:
+                    fields["birth_date"] = printed_dob
+                    rules.append(f"ZONE_DOB: تاريخ الميلاد المطبوع ← {printed_dob}")
+            else:
+                rules.append(
+                    f"DOB_EQ: تاريخ الميلاد من الرقم القومي ← {fields.get('birth_date')}"
+                )
+
+            # Final guarantee: DOB from national ID equation
+            if fields.get("national_id"):
+                decoded3 = decode_national_id(str(fields["national_id"]))
+                if decoded3.get("birth_date"):
+                    if not fields.get("birth_date"):
+                        rules.append("EQ_FALLBACK: تاريخ الميلاد من الرقم القومي")
+                    fields["birth_date"] = decoded3["birth_date"]
+                    fields["governorate"] = decoded3.get("governorate") or fields.get(
+                        "governorate"
+                    )
+                    fields["gender"] = decoded3.get("gender") or fields.get("gender")
+                    decoded = decoded3
+
+            # Last resort: any date-like OCR already gathered
+            if not fields.get("birth_date"):
+                printed_all = extract_printed_birth_date(
+                    [t.text for t in tokens] + dob_lines
+                )
+                if printed_all:
+                    fields["birth_date"] = printed_all
+                    rules.append(f"DOB_SCAN: {printed_all}")
+
+            # Drop invalid NID that cannot produce a birth date
+            if fields.get("national_id") and not fields.get("birth_date"):
+                if score_national_id_candidate(str(fields["national_id"])) < 11:
+                    rules.append(
+                        f"NID_REJECT: {fields.get('national_id')} (تاريخ غير صالح)"
+                    )
+                    fields["national_id"] = None
 
         # Back-side dedicated zones (job / status / expiry) — above barcode
         if side == "back":
@@ -3021,7 +3366,9 @@ class EgyptianIdExtractor:
             "original": _encode_image_b64(preview, quality=80),
             "card": _encode_image_b64(card, quality=88),
         }
-        crop_pack = build_field_crops(card, tokens, fields, face, side=side)
+        crop_pack = build_field_crops(
+            card, tokens, fields, face, side=side, face_box=face_box
+        )
         if crop_pack.get("face"):
             images["face"] = crop_pack["face"]
         elif face is not None and face.size:
@@ -3034,9 +3381,9 @@ class EgyptianIdExtractor:
         filled = sum(1 for k, v in fields.items() if v and k != "card_side")
         crop_n = len(images["crops"]) + (1 if images.get("face") else 0)
         message = (
-            f"[v2026-09-13b · قص={crop_method}] تم ضبط {filled} حقل · {crop_n} قصّة ({fields.get('card_side')})."
+            f"[v2026-09-13e · قص={crop_method}] تم ضبط {filled} حقل · {crop_n} قصّة ({fields.get('card_side')})."
             if filled
-            else f"[v2026-09-13b · قص={crop_method}] القراءة ضعيفة — صوّر أوضح أو ارفع الوجه الآخر."
+            else f"[v2026-09-13e · قص={crop_method}] القراءة ضعيفة — صوّر أوضح أو ارفع الوجه الآخر."
         )
 
         return EgyptianIdResult(
@@ -3165,6 +3512,7 @@ FIELD_TO_ZONE: dict[str, tuple[str, str]] = {
     "full_name": ("front", "name"),
     "address": ("front", "address"),
     "national_id": ("front", "national_id"),
+    "birth_date": ("front", "birth_date"),
     "face": ("front", "face"),
     "job": ("back", "job"),
     "religion": ("back", "status"),
@@ -3180,6 +3528,7 @@ def zone_box_for_field(
     side: str,
     *,
     tokens: list[OcrToken] | None = None,
+    face_box: tuple[float, float, float, float] | None = None,
 ) -> tuple[float, float, float, float] | None:
     mapping = FIELD_TO_ZONE.get(field_key)
     if not mapping:
@@ -3189,11 +3538,15 @@ def zone_box_for_field(
         return None
     if side == "back" and z_side != "back":
         return None
-    if z_side == "front" and tokens:
+    if z_side == "front" and tokens is not None:
         if z_name == "name":
             return _effective_name_box(tokens)
         if z_name == "address":
             return _effective_address_box(tokens)
+        if z_name == "birth_date":
+            return birth_date_zone_box(face_box)
+    if z_side == "front" and z_name == "birth_date":
+        return birth_date_zone_box(face_box)
     return ID_ZONES.get(z_side, {}).get(z_name)
 
 
@@ -3204,9 +3557,10 @@ def build_field_crops(
     face: np.ndarray | None,
     *,
     side: str = "front",
+    face_box: tuple[float, float, float, float] | None = None,
 ) -> dict[str, Any]:
     """Crop previews: prefer OCR-token union clipped to layout zone (tight & accurate)."""
-    crop_keys_front = ["full_name", "address", "national_id"]
+    crop_keys_front = ["full_name", "address", "national_id", "birth_date"]
     crop_keys_back = [
         "job",
         "religion",
@@ -3222,12 +3576,18 @@ def build_field_crops(
     meta: dict[str, Any] = {}
 
     for key in crop_keys:
-        zone_box = zone_box_for_field(key, layout, tokens=tokens)
+        zone_box = zone_box_for_field(
+            key, layout, tokens=tokens, face_box=face_box
+        )
         if zone_box is None:
             continue
         value = fields.get(key)
-        # Tight crop from tokens that match the extracted field text
-        tight = _token_crop_box_for_field(tokens, key, value, zone_box)
+        # For DOB always show the layout zone under the photo (equation DOB
+        # has no matching OCR tokens on the right-side NID band).
+        if key == "birth_date":
+            tight = None
+        else:
+            tight = _token_crop_box_for_field(tokens, key, value, zone_box)
         box = tight or zone_box
         roi = crop_norm_region(card, box)
         if roi is not None and roi.size:
