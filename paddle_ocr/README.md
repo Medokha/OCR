@@ -2,6 +2,8 @@
 
 تطبيق ويب لاستخراج النص العربي من ملفات PDF باستخدام [PaddleOCR](https://github.com/PaddlePaddle/PaddleOCR) (الإصدار 3.x / نموذج عربي PP-OCRv5).
 
+> **Full model write-up:** see [`MODELS.md`](MODELS.md) (PaddleOCR, OnnxTR, DeepLab autocrop, YuNet).
+
 ## المتطلبات
 
 - Python 3.10+

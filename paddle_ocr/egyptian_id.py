@@ -246,11 +246,14 @@ JOB_HINTS = (
 _OCR_WORD_FIXES_RAW: dict[str, str] = {
     "صحمد": "محمد",
     "محمو": "محمود",
+    "خالاد": "خالد",
+    "خالا": "خالد",
     "علس": "على",
     "الاه": "الله",
     "الآه": "الله",
     "اللة": "الله",
     "اشمون": "أشمون",
+    "سمادون": "سمادون",
     "اعزب": "أعزب",
     "انثي": "أنثى",
     "انثى": "أنثى",
@@ -557,6 +560,183 @@ def auto_deskew_card(image_bgr: np.ndarray, max_angle: float = 8.0) -> np.ndarra
         return image_bgr
 
 
+def rotate_card_image(image_bgr: np.ndarray, angle_cw: int) -> np.ndarray:
+    """Rotate card by 0/90/180/270 degrees clockwise."""
+    ang = int(angle_cw) % 360
+    if ang == 0 or image_bgr is None or not getattr(image_bgr, "size", 0):
+        return image_bgr
+    code = {
+        90: cv2.ROTATE_90_CLOCKWISE,
+        180: cv2.ROTATE_180,
+        270: cv2.ROTATE_90_COUNTERCLOCKWISE,
+    }.get(ang)
+    if code is None:
+        return image_bgr
+    return cv2.rotate(image_bgr, code)
+
+
+def _green_header_orientation_score(image_bgr: np.ndarray) -> float:
+    """Upright front ID: teal/green header sits in the TOP band."""
+    try:
+        hsv = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2HSV)
+        # Teal/green header ink on Egyptian front cards
+        mask = cv2.inRange(hsv, (35, 35, 35), (100, 255, 255))
+        h, w = mask.shape[:2]
+        if h < 20 or w < 20:
+            return 0.0
+        top = float(mask[: max(1, h // 4), :].mean())
+        bot = float(mask[3 * h // 4 :, :].mean())
+        return top - bot
+    except Exception:  # noqa: BLE001
+        return 0.0
+
+
+def _magenta_header_orientation_score(image_bgr: np.ndarray) -> float:
+    """Upright back ID: pink/magenta republic ink sits in the TOP band."""
+    try:
+        hsv = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2HSV)
+        # Magenta / fuchsia header common on Egyptian ID backs
+        m1 = cv2.inRange(hsv, (135, 35, 40), (175, 255, 255))
+        m2 = cv2.inRange(hsv, (0, 40, 50), (18, 255, 255))  # warm pink-red
+        mask = cv2.bitwise_or(m1, m2)
+        h, w = mask.shape[:2]
+        if h < 20 or w < 20:
+            return 0.0
+        top = float(mask[: max(1, h // 4), :].mean())
+        bot = float(mask[3 * h // 4 :, :].mean())
+        return top - bot
+    except Exception:  # noqa: BLE001
+        return 0.0
+
+
+def _barcode_band_density(image_bgr: np.ndarray, y0: float, y1: float) -> float:
+    """How much a horizontal band looks like a dense PDF417 barcode."""
+    h, w = image_bgr.shape[:2]
+    if h < 40 or w < 40:
+        return 0.0
+    ya, yb = int(h * y0), int(h * y1)
+    ya, yb = max(0, ya), min(h, max(ya + 1, yb))
+    roi = image_bgr[ya:yb, int(w * 0.04) : int(w * 0.96)]
+    if roi.size == 0:
+        return 0.0
+    gray = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
+    blur = cv2.GaussianBlur(gray, (3, 3), 0)
+    edges = cv2.Canny(blur, 60, 160)
+    edge_ratio = float(np.count_nonzero(edges)) / float(edges.size)
+    col_std = float(np.std(gray.astype(np.float32), axis=0).mean())
+    score = 0.0
+    if edge_ratio >= 0.12:
+        score += 3.0
+    elif edge_ratio >= 0.07:
+        score += 1.5
+    elif edge_ratio >= 0.04:
+        score += 0.5
+    if col_std >= 35:
+        score += 2.0
+    elif col_std >= 22:
+        score += 1.0
+    return score
+
+
+def _barcode_orientation_score(image_bgr: np.ndarray) -> float:
+    """Positive when dense barcode is at the BOTTOM (upright Egyptian ID back)."""
+    bot = _barcode_band_density(image_bgr, 0.55, 0.98)
+    top = _barcode_band_density(image_bgr, 0.02, 0.45)
+    return bot - top
+
+
+def score_card_upright(image_bgr: np.ndarray) -> float:
+    """Higher = more likely upright Egyptian ID (front or back landscape)."""
+    if image_bgr is None or not getattr(image_bgr, "size", 0):
+        return -1e9
+    h, w = image_bgr.shape[:2]
+    score = 0.0
+    # Cropped ID is usually landscape
+    if w >= h:
+        score += 2.0
+    else:
+        score -= 1.5
+
+    faces = detect_faces(image_bgr)
+    face_bonus = 0.0
+    if faces:
+        x, y, bw, bh = max(faces, key=lambda f: f[2] * f[3])
+        cx = (x + bw * 0.5) / max(w, 1)
+        cy = (y + bh * 0.5) / max(h, 1)
+        # Front upright: portrait on the LEFT, upper half
+        if cx <= 0.40:
+            face_bonus += 16.0
+        elif cx >= 0.55:
+            face_bonus -= 12.0
+        else:
+            face_bonus -= 2.0
+        if cy <= 0.58:
+            face_bonus += 5.0
+        else:
+            face_bonus -= 4.0
+        area = (bw * bh) / float(max(w * h, 1))
+        if 0.02 <= area <= 0.28:
+            face_bonus += 2.0
+
+    g = _green_header_orientation_score(image_bgr)
+    m = _magenta_header_orientation_score(image_bgr)
+    bar = _barcode_orientation_score(image_bgr)
+    # Strong barcode asymmetry → treat as BACK (no reliable face cue)
+    looks_like_back = abs(bar) >= 1.2 and face_bonus < 8.0
+
+    if looks_like_back:
+        # Back upright: PDF417 at bottom, pink/magenta header at top
+        score += max(-14.0, min(14.0, bar * 4.0))
+        score += max(-8.0, min(8.0, m / 5.0))
+        score += max(-4.0, min(4.0, g / 10.0))
+        score += face_bonus * 0.15  # faces on back are rare / false positives
+    else:
+        score += face_bonus
+        # Green republic header → top when upright (front 180° flips)
+        score += max(-8.0, min(8.0, g / 6.0))
+        score += max(-3.0, min(3.0, m / 12.0))
+        score += max(-3.0, min(3.0, bar * 0.8))
+    return score
+
+
+def correct_card_orientation(
+    image_bgr: np.ndarray,
+) -> tuple[np.ndarray, int, str]:
+    """Auto-rotate ID card to upright (0/90/180/270 — front or back)."""
+    if image_bgr is None or not getattr(image_bgr, "size", 0):
+        return image_bgr, 0, "ORIENT: تخطي"
+    h, w = image_bgr.shape[:2]
+    # Always try quarter turns — phone photos of back/front often land sideways
+    angles = [0, 90, 180, 270]
+
+    # Score on a smaller probe for speed (YuNet × 4)
+    probe = image_bgr
+    max_side = max(h, w)
+    if max_side > 720:
+        s = 720 / max_side
+        probe = cv2.resize(
+            image_bgr,
+            (max(1, int(w * s)), max(1, int(h * s))),
+            interpolation=cv2.INTER_AREA,
+        )
+
+    best_ang = 0
+    best_sc = -1e18
+    for ang in angles:
+        rot = rotate_card_image(probe, ang)
+        sc = score_card_upright(rot)
+        if sc > best_sc:
+            best_sc = sc
+            best_ang = ang
+
+    best_img = rotate_card_image(image_bgr, best_ang) if best_ang else image_bgr
+    if best_ang:
+        note = f"ORIENT: تدوير البطاقة {best_ang}° قبل القراءة"
+    else:
+        note = "ORIENT: الاتجاه مضبوط"
+    return best_img, best_ang, note
+
+
 def pad_zone(
     box: tuple[float, float, float, float],
     pad: float = 0.02,
@@ -587,15 +767,18 @@ def detect_faces(image_bgr: np.ndarray) -> list[tuple[int, int, int, int]]:
         except Exception:  # noqa: BLE001
             logger.debug("YuNet failed", exc_info=True)
 
-    if not boxes:
-        cascade = cv2.CascadeClassifier(
-            cv2.data.haarcascades + "haarcascade_frontalface_default.xml"
-        )
-        gray = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2GRAY)
-        for x, y, bw, bh in cascade.detectMultiScale(
-            gray, scaleFactor=1.1, minNeighbors=4, minSize=(40, 40)
-        ):
-            boxes.append((int(x), int(y), int(bw), int(bh)))
+    if not boxes and hasattr(cv2, "CascadeClassifier") and hasattr(cv2, "data"):
+        try:
+            cascade = cv2.CascadeClassifier(
+                cv2.data.haarcascades + "haarcascade_frontalface_default.xml"
+            )
+            gray = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2GRAY)
+            for x, y, bw, bh in cascade.detectMultiScale(
+                gray, scaleFactor=1.1, minNeighbors=4, minSize=(40, 40)
+            ):
+                boxes.append((int(x), int(y), int(bw), int(bh)))
+        except Exception:  # noqa: BLE001
+            logger.debug("Haar cascade unavailable", exc_info=True)
 
     boxes.sort(key=lambda b: b[2] * b[3], reverse=True)
     return boxes
@@ -1030,56 +1213,121 @@ def _match_known_value(text: str, values: tuple[str, ...]) -> str | None:
 
 
 def extract_expiry_date(texts: list[str]) -> str | None:
-    """Parse card validity date near «سارية حتى» (YYYY-MM-DD)."""
+    """Parse card validity date near «سارية حتى» (YYYY-MM-DD).
 
-    def _from_ascii(ascii_t: str) -> str | None:
+    OCR often drops slashes (٢٠٣٢/٠٢/١٥ → ٢٠٣٢٠٢١٥) or turns '/' into '1'
+    (→ ٢٠٣٢١٠٢١٥). Prefer dates on سارية/حتى lines and recover 9-digit glitches.
+    """
+
+    def _ymd_ok(y: int, mo: int, d: int) -> bool:
+        return 2009 <= y <= 2099 and 1 <= mo <= 12 and 1 <= d <= 31
+
+    def _fmt(y: int, mo: int, d: int) -> str:
+        return f"{y:04d}-{mo:02d}-{d:02d}"
+
+    def _from_digit_run(run: str) -> list[tuple[float, str]]:
+        found: list[tuple[float, str]] = []
+        if not run.startswith("20"):
+            return found
+        if len(run) == 8:
+            y, mo, d = int(run[:4]), int(run[4:6]), int(run[6:8])
+            if _ymd_ok(y, mo, d):
+                found.append((8.0, _fmt(y, mo, d)))
+            return found
+        if len(run) == 9:
+            # Extra digit (slash misread as 1, etc.) — try deleting one
+            for drop in range(9):
+                chunk = run[:drop] + run[drop + 1 :]
+                y, mo, d = int(chunk[:4]), int(chunk[4:6]), int(chunk[6:8])
+                if not _ymd_ok(y, mo, d):
+                    continue
+                score = 7.0
+                # '/' → '1' right after year is the common glitch: 2032 1 0215
+                if drop == 4 and run[4] == "1":
+                    score += 3.0
+                if mo <= 9:
+                    score += 0.5
+                found.append((score, _fmt(y, mo, d)))
+            return found
+        # Longer digit soup — sliding windows, but penalize leftovers
+        for i in range(0, len(run) - 7):
+            chunk = run[i : i + 8]
+            if not chunk.startswith("20"):
+                continue
+            y, mo, d = int(chunk[:4]), int(chunk[4:6]), int(chunk[6:8])
+            if _ymd_ok(y, mo, d):
+                found.append((3.0, _fmt(y, mo, d)))
+        for i in range(0, len(run) - 8):
+            chunk9 = run[i : i + 9]
+            found.extend((sc - 1.0, dt) for sc, dt in _from_digit_run(chunk9))
+        return found
+
+    def _candidates_from_text(text: str) -> list[tuple[float, str]]:
+        ascii_t = to_ascii_digits(text or "")
         if not ascii_t:
-            return None
+            return []
+        found: list[tuple[float, str]] = []
+        # Clear YYYY/MM/DD (or - . space) — highest trust
         for m in re.finditer(
             r"(20\d{2})\s*[/\-.\s]\s*(\d{1,2})\s*[/\-.\s]\s*(\d{1,2})",
             ascii_t,
         ):
             y, mo, d = int(m.group(1)), int(m.group(2)), int(m.group(3))
-            if 1 <= mo <= 12 and 1 <= d <= 31:
-                return f"{y:04d}-{mo:02d}-{d:02d}"
+            if _ymd_ok(y, mo, d):
+                found.append((12.0, _fmt(y, mo, d)))
         for m in re.finditer(
             r"(\d{1,2})\s*[/\-.\s]\s*(\d{1,2})\s*[/\-.\s]\s*(20\d{2})",
             ascii_t,
         ):
             a, b, y = int(m.group(1)), int(m.group(2)), int(m.group(3))
-            if a <= 31 and 1 <= b <= 12:
-                return f"{y:04d}-{b:02d}-{a:02d}"
-            if b <= 31 and 1 <= a <= 12:
-                return f"{y:04d}-{a:02d}-{b:02d}"
-        # Compact YYYYMMDD
+            if _ymd_ok(y, b, a) and a <= 31 and b <= 12:
+                found.append((11.0, _fmt(y, b, a)))
+            elif _ymd_ok(y, a, b) and b <= 31 and a <= 12:
+                found.append((10.0, _fmt(y, a, b)))
+        # Digit runs (compact / glitched)
+        for m in re.finditer(r"20\d{6,12}", re.sub(r"\D", "", ascii_t)):
+            found.extend(_from_digit_run(m.group(0)))
+        # Also whole digit soup if no run matched oddly
         digits = re.sub(r"\D", "", ascii_t)
-        for i in range(0, max(0, len(digits) - 7)):
-            chunk = digits[i : i + 8]
-            if not chunk.startswith("20"):
-                continue
-            y, mo, d = int(chunk[:4]), int(chunk[4:6]), int(chunk[6:8])
-            if 2000 <= y <= 2099 and 1 <= mo <= 12 and 1 <= d <= 31:
-                return f"{y:04d}-{mo:02d}-{d:02d}"
-        return None
+        if digits.startswith("20") and 8 <= len(digits) <= 14:
+            found.extend(_from_digit_run(digits[:9] if len(digits) >= 9 else digits[:8]))
+        return found
 
-    # Prefer lines that mention validity, then their neighbors, then all
-    ranked: list[str] = []
-    for i, text in enumerate(texts):
-        n = normalize_ar(text or "")
-        if any(k in n for k in ("ساري", "حتى", "بطاق")) or re.search(
-            r"20\d{2}", to_ascii_digits(text or "")
-        ):
-            ranked.append(text)
-            if i + 1 < len(texts):
-                ranked.append(texts[i + 1])
-            if i > 0:
-                ranked.append(texts[i - 1])
-    for text in list(texts) + ranked:
-        got = _from_ascii(to_ascii_digits(text or ""))
-        if got:
-            return got
-    joined = to_ascii_digits(" ".join(texts))
-    return _from_ascii(joined)
+    scored: list[tuple[float, str]] = []
+    texts_list = [t for t in (texts or []) if t]
+    for i, text in enumerate(texts_list):
+        n = normalize_ar(text)
+        ctx = 0.0
+        if "ساري" in n:
+            ctx += 20.0
+        if "حتى" in n or "حتي" in n:
+            ctx += 8.0
+        if "بطاق" in n:
+            ctx += 4.0
+        if re.search(r"20\d{2}", to_ascii_digits(text)):
+            ctx += 2.0
+        # Skip pure noise without year / validity cue
+        if ctx < 2.0:
+            continue
+        for sc, dt in _candidates_from_text(text):
+            scored.append((ctx + sc, dt))
+        # Neighbor lines often hold the date when label/date split
+        if ctx >= 8.0:
+            for j in (i - 1, i + 1):
+                if 0 <= j < len(texts_list):
+                    for sc, dt in _candidates_from_text(texts_list[j]):
+                        scored.append((ctx * 0.5 + sc, dt))
+
+    if not scored:
+        # Last resort: any date-like pattern in joined text
+        joined = to_ascii_digits(" ".join(texts_list))
+        for sc, dt in _candidates_from_text(joined):
+            scored.append((sc, dt))
+
+    if not scored:
+        return None
+    scored.sort(key=lambda x: x[0], reverse=True)
+    return scored[0][1]
 
 
 def finalize_back_job(text: str | None) -> str | None:
@@ -1289,28 +1537,41 @@ def extract_back_fields(tokens: list[OcrToken]) -> tuple[dict[str, Any], list[st
         if cy > 0.50:
             score -= 2.0
         if 0.02 <= cy <= 0.45 and _arabic_ratio(text) >= 0.55 and len(text) >= 4:
+            # Reject short junk / barcode hallucinations (e.g. «مسلح»)
+            if len(normalize_ar(text)) < 6 and not any(
+                normalize_ar(h) in n for h in JOB_HINTS
+            ):
+                continue
+            if _has_ocr_garbage(text) and not any(
+                normalize_ar(h) in n for h in JOB_HINTS
+            ):
+                continue
             job_candidates.append((score, text.strip()))
 
     if job_candidates:
         job_candidates.sort(key=lambda x: x[0], reverse=True)
-        top = job_candidates[0][1]
-        # Only append a second line when it's a real continuation (تخصص…),
-        # never a near-duplicate re-OCR of the same profession.
-        extra = None
-        for _s, t in job_candidates[1:3]:
-            if _jobs_near_duplicate(top, t):
-                continue
-            tn = normalize_ar(t)
-            if "تخصص" in tn or (
-                len(t) >= 6
-                and _arabic_ratio(t) >= 0.6
-                and not _parse_status_triplet(t)["gender"]
-            ):
-                extra = t
-                break
-        raw_job = f"{top} {extra}".strip() if extra else top
-        out["job"] = finalize_back_job(raw_job)
-        notes.append("BACK: المهنة")
+        top_score, top = job_candidates[0]
+        has_hint = any(normalize_ar(h) in normalize_ar(top) for h in JOB_HINTS)
+        if top_score < 3.5 and not has_hint:
+            top = None
+        if top:
+            # Only append a second line when it's a real continuation (تخصص…),
+            # never a near-duplicate re-OCR of the same profession.
+            extra = None
+            for _s, t in job_candidates[1:3]:
+                if _jobs_near_duplicate(top, t):
+                    continue
+                tn = normalize_ar(t)
+                if "تخصص" in tn or (
+                    len(t) >= 6
+                    and _arabic_ratio(t) >= 0.6
+                    and not _parse_status_triplet(t)["gender"]
+                ):
+                    extra = t
+                    break
+            raw_job = f"{top} {extra}".strip() if extra else top
+            out["job"] = finalize_back_job(raw_job)
+            notes.append("BACK: المهنة")
 
     for i, t in enumerate(usable):
         n = t.norm_text
@@ -1342,6 +1603,30 @@ def find_national_id_from_tokens(tokens: list[OcrToken]) -> str | None:
     if bottom:
         return best_national_id_from_texts([t.text for t in bottom])
     return None
+
+
+def _nid_grounded_in_texts(nid: str, texts: list[str]) -> bool:
+    """True if NID (or its 11+ digit core) appears in a single OCR line."""
+    d = _digit_soup(nid)
+    if len(d) != 14:
+        return False
+    core = d[3:]  # MM DD gov serial check — stable across century/year OCR errors
+    for t in texts:
+        soup = _digit_soup(t)
+        if len(soup) < 10:
+            continue
+        if d in soup or soup in d:
+            return True
+        if core and core in soup:
+            return True
+        if len(soup) >= 11 and (soup[-11:] == d[-11:] or soup[:11] == d[:11]):
+            return True
+        # 15-digit strip with one garbage digit
+        if len(soup) == 15:
+            for i in range(15):
+                if soup[:i] + soup[i + 1 :] == d:
+                    return True
+    return False
 
 
 def score_national_id_candidate(cand: str) -> int:
@@ -2597,9 +2882,16 @@ def pick_best_front_zones(
             crop_name = _lines_from_zone_ocr(name_raw, kind="name")
             if crop_name:
                 notes.append(f"CROP_NAME← {' || '.join(crop_name)}")
-                if _name_field_score(_join_field_lines(crop_name)) > _name_field_score(
-                    _join_field_lines(name_lines)
-                ):
+                crop_j = _join_field_lines(crop_name)
+                tok_j = _join_field_lines(name_lines)
+                # Never let a weaker/incomplete crop overwrite clean full-card tokens
+                # (common: خالاد بدل خالد، أو فقدان الاسم الأول «محمد»)
+                if name_lines and len(name_lines) >= len(crop_name):
+                    if _name_field_score(crop_j) <= _name_field_score(tok_j) + 1.2:
+                        pass
+                    elif _name_field_score(crop_j) > _name_field_score(tok_j) + 2.5:
+                        name_lines = crop_name
+                elif _name_field_score(crop_j) > _name_field_score(tok_j):
                     name_lines = crop_name
                 elif len(name_lines) < len(crop_name):
                     # Merge missing short first name
@@ -2608,6 +2900,8 @@ def pick_best_front_zones(
                             if _looks_like_person_name(ln) and len(normalize_ar(ln).split()) <= 2:
                                 name_lines = [ln, *name_lines][:2]
                                 break
+                elif not name_lines:
+                    name_lines = crop_name
         if need_addr:
             addr_raw = zone_lines_fn(
                 engine, card, addr_ocr_box[1], addr_ocr_box[3], addr_ocr_box[0], addr_ocr_box[2], scale=1.7
@@ -3019,8 +3313,7 @@ class EgyptianIdExtractor:
     ) -> list[str]:
         """One tight upscaled NID strip + optional OnnxTR — avoid multi-variant crashes."""
         box = ID_ZONES["front"]["national_id"]
-        # Slightly tighter classic band (leading digits live near mid-right)
-        classic = (max(0.34, box[0]), 0.70, 0.98, 0.88)
+        classic = (max(0.30, box[0]), max(0.68, box[1]), min(0.99, box[2]), min(0.90, box[3]))
         lines: list[str] = []
         for zone in (classic, box):
             roi = crop_norm_region(card, zone, min_h=32)
@@ -3062,33 +3355,45 @@ class EgyptianIdExtractor:
         from ocr_engine import ArabicOcrEngine
 
         original = _load_bgr(image_path)
-        preview = original.copy()
+        # 1) Orient the photo FIRST — DeepLab/zones fail on upside-down cards
+        oriented, orient_ang, orient_note = correct_card_orientation(original)
+        preview = oriented.copy()
         ph, pw = preview.shape[:2]
         if max(ph, pw) > 1200:
             s = 1200 / max(ph, pw)
             preview = cv2.resize(preview, (int(pw * s), int(ph * s)))
 
-        card = original
+        # 2) Crop card from the upright image
+        card = oriented
         crop_method = "raw"
         try:
             from card_crop import crop_id_card
 
             card, crop_method = crop_id_card(
-                original,
+                oriented,
                 fallback_quad_fn=detect_card_quad,
                 warp_fn=warp_card,
             )
         except Exception:  # noqa: BLE001
             logger.debug("ML card crop unavailable", exc_info=True)
-            quad = detect_card_quad(original)
+            quad = detect_card_quad(oriented)
             if quad is not None:
                 try:
-                    card = warp_card(original, quad)
+                    card = warp_card(oriented, quad)
                     crop_method = "contour"
                 except Exception:  # noqa: BLE001
                     logger.debug("warp failed", exc_info=True)
-                    card = original
+                    card = oriented
         card = auto_deskew_card(card)
+        # 3) Second pass after crop (warp can leave card rotated)
+        card, orient_ang2, orient_note2 = correct_card_orientation(card)
+        if orient_ang2:
+            orient_note = (
+                f"{orient_note} → بعد القص: تدوير {orient_ang2}°"
+                if orient_ang
+                else orient_note2
+            )
+            orient_ang = (orient_ang + orient_ang2) % 360
 
         # PaddleOCR can AV-crash on very large ID photos on some Windows setups;
         # keep a display card, OCR a capped working copy.
@@ -3134,10 +3439,19 @@ class EgyptianIdExtractor:
 
         if forced_side in {"front", "back"}:
             side = forced_side
-            rules_side = [f"SIDE_FORCED: {side}", f"CROP: {crop_method}"]
+            rules_side = [
+                f"SIDE_FORCED: {side}",
+                f"CROP: {crop_method}",
+                orient_note,
+            ]
         else:
             side = guess_side(tokens + onnx_tokens, ocr_card)
-            rules_side = [f"SIDE_DETECT: {side}", f"CROP: {crop_method}"]
+            rules_side = [
+                f"SIDE_DETECT: {side}",
+                f"CROP: {crop_method}",
+                orient_note,
+            ]
+        _ = orient_ang
         fields, decoded, rules = apply_field_rules(
             tokens, side, face_box=face_box if side != "back" else None
         )
@@ -3236,20 +3550,25 @@ class EgyptianIdExtractor:
                 fields["address"] = best_addr
                 rules.append("ZONE_MERGE: العنوان (تسلسل OCR + مناطق)")
 
-            # NID strip: prefer ORIGINAL (DeepLab warp often corrupts leading digits)
-            nid_base = original
-            nh, nw = nid_base.shape[:2]
-            if max(nh, nw) > 1000:
-                ns = 1000 / max(nh, nw)
-                nid_base = cv2.resize(
-                    nid_base,
-                    (int(nw * ns), int(nh * ns)),
-                    interpolation=cv2.INTER_AREA,
-                )
-            nid_lines = self._read_national_id_lines(engine, enhance_id_card(nid_base))
+            # NID strip: read from ORIENTED card (after 180° fix). Raw original
+            # is upside-down when user flips the photo and pollutes digits.
+            nid_lines = self._read_national_id_lines(engine, ocr_card_enh)
             if not best_national_id_from_texts(nid_lines):
                 nid_lines += self._read_national_id_lines(engine, ocr_card)
-            nid = best_national_id_from_texts(nid_lines + [t.text for t in tokens])
+            # Prefer strip-only result — full-card token soup invents false NIDs
+            # (e.g. 275… / 298…) that still pass checksum.
+            strip_nid = best_national_id_from_texts(nid_lines)
+            tok_nid = best_national_id_from_texts([t.text for t in tokens])
+            nid = strip_nid
+            if not nid:
+                nid = tok_nid
+            elif tok_nid and tok_nid != strip_nid:
+                # Keep strip unless token match is clearly better AND grounded
+                ss = score_national_id_candidate(strip_nid)
+                ts = score_national_id_candidate(tok_nid)
+                if ts >= ss + 4 and _nid_grounded_in_texts(tok_nid, nid_lines):
+                    nid = tok_nid
+                    rules.append(f"NID_TOK_WIN: {strip_nid} ← {tok_nid}")
             if not nid:
                 nid = find_national_id_from_tokens(tokens)
             if nid and score_national_id_candidate(nid) >= 11:
@@ -3403,8 +3722,14 @@ class EgyptianIdExtractor:
                     if not cleaned or len(cleaned) < 3:
                         continue
                     n = normalize_ar(cleaned)
+                    if len(n) < 6 and not any(normalize_ar(h) in n for h in JOB_HINTS):
+                        continue
                     st = _parse_status_triplet(cleaned)
                     if sum(1 for v in st.values() if v) >= 2:
+                        continue
+                    if _has_ocr_garbage(cleaned) and not any(
+                        normalize_ar(h) in n for h in JOB_HINTS
+                    ):
                         continue
                     s = float(len(cleaned))
                     if any(normalize_ar(h) in n for h in JOB_HINTS):
@@ -3422,6 +3747,11 @@ class EgyptianIdExtractor:
                         fields["job"] = best_job
 
             fields["job"] = finalize_back_job(fields.get("job"))
+            # Drop weak hallucinated profession on partial back crops
+            jn = normalize_ar(str(fields.get("job") or ""))
+            if jn and len(jn) < 6 and not any(normalize_ar(h) in jn for h in JOB_HINTS):
+                fields["job"] = None
+                rules.append("BACK_JOB: تجاهل مهنة ضعيفة/مشوهة")
 
             if not fields.get("expiry_date"):
                 exp = extract_expiry_date(
@@ -3432,11 +3762,26 @@ class EgyptianIdExtractor:
                     fields["expiry_date"] = exp
                     rules.append(f"ZONE_EXPIRY: سريان ← {exp}")
             else:
-                # Re-check zone in case early parse was empty/wrong
-                exp2 = extract_expiry_date(expiry_zone + expiry_band_texts)
+                # Prefer سارية-line parse over an earlier digit-soup guess
+                prefer = [
+                    t
+                    for t in (expiry_zone + expiry_band_texts + [t.text for t in tokens])
+                    if t
+                    and (
+                        "ساري" in normalize_ar(t)
+                        or "حتى" in normalize_ar(t)
+                        or "حتي" in normalize_ar(t)
+                    )
+                ]
+                exp2 = extract_expiry_date(prefer + expiry_zone + expiry_band_texts)
                 if exp2 and exp2 != fields.get("expiry_date"):
                     fields["expiry_date"] = exp2
                     rules.append(f"ZONE_EXPIRY: تحديث السريان ← {exp2}")
+                elif prefer:
+                    exp3 = extract_expiry_date(prefer)
+                    if exp3:
+                        fields["expiry_date"] = exp3
+                        rules.append(f"ZONE_EXPIRY: سريان من سطر البطاقة ← {exp3}")
 
             # Status band: parse gender/religion/marital explicitly
             for ln in status_zone + job_zone:
@@ -3485,9 +3830,9 @@ class EgyptianIdExtractor:
         filled = sum(1 for k, v in fields.items() if v and k != "card_side")
         crop_n = len(images["crops"]) + (1 if images.get("face") else 0)
         message = (
-            f"[v2026-09-13e · قص={crop_method}] تم ضبط {filled} حقل · {crop_n} قصّة ({fields.get('card_side')})."
+            f"[v2026-09-14e · قص={crop_method}] تم ضبط {filled} حقل · {crop_n} قصّة ({fields.get('card_side')})."
             if filled
-            else f"[v2026-09-13e · قص={crop_method}] القراءة ضعيفة — صوّر أوضح أو ارفع الوجه الآخر."
+            else f"[v2026-09-14e · قص={crop_method}] القراءة ضعيفة — صوّر أوضح أو ارفع الوجه الآخر."
         )
 
         return EgyptianIdResult(
