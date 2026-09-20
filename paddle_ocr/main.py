@@ -23,6 +23,7 @@ from fastapi.templating import Jinja2Templates
 
 from egyptian_id import EgyptianIdExtractor, ensure_yunet_model
 from field_extractor import FieldExtractor
+from form_zones import FormZoneExtractor
 from mapping_store import apply_mapping, load_mapping, save_mapping
 from ocr_engine import (
     PDF_EXTENSIONS,
@@ -45,6 +46,7 @@ templates = Jinja2Templates(directory=str(BASE_DIR / "templates"))
 MAX_UPLOAD_MB = 40
 field_extractor = FieldExtractor()
 id_extractor = EgyptianIdExtractor()
+form_extractor = FormZoneExtractor()
 IMAGE_ONLY = {".png", ".jpg", ".jpeg", ".webp", ".bmp", ".tif", ".tiff"}
 
 
@@ -129,6 +131,15 @@ async def egyptian_id_page(request: Request) -> HTMLResponse:
     )
 
 
+@app.get("/form", response_class=HTMLResponse)
+async def form_zones_page(request: Request) -> HTMLResponse:
+    return templates.TemplateResponse(
+        request,
+        "form.html",
+        {"max_upload_mb": MAX_UPLOAD_MB},
+    )
+
+
 @app.get("/health")
 async def health() -> dict[str, str]:
     return {"status": "ok", "engine": "PaddleOCR", "lang": "ar"}
@@ -206,6 +217,50 @@ async def ocr_egyptian_id(
         raise HTTPException(
             status_code=500,
             detail=f"فشل قراءة البطاقة: {exc}",
+        ) from exc
+    finally:
+        shutil.rmtree(work_dir, ignore_errors=True)
+
+
+@app.post("/api/form/zones")
+async def form_answer_zones(file: UploadFile = File(...)) -> JSONResponse:
+    """Locate answer zones on a structured form, annotate, then read values."""
+    content = await file.read()
+    if not file.filename:
+        raise HTTPException(status_code=400, detail="لم يتم اختيار ملف.")
+    ext = _file_extension(file.filename)
+    if ext not in IMAGE_ONLY:
+        raise HTTPException(
+            status_code=400,
+            detail="ارفع صورة الفورم (PNG / JPG / WEBP / BMP / TIFF).",
+        )
+    size_mb = len(content) / (1024 * 1024)
+    if size_mb > MAX_UPLOAD_MB:
+        raise HTTPException(
+            status_code=400,
+            detail=f"حجم الملف أكبر من {MAX_UPLOAD_MB} ميجابايت.",
+        )
+    if not content:
+        raise HTTPException(status_code=400, detail="الملف فارغ.")
+
+    job_id = uuid.uuid4().hex
+    work_dir = Path(tempfile.mkdtemp(prefix=f"form_{job_id}_", dir=UPLOAD_DIR))
+    input_path = work_dir / f"form{ext}"
+    try:
+        input_path.write_bytes(content)
+        logger.info("Form zones: %s (%.2f MB)", file.filename, size_mb)
+        result = form_extractor.process_image_path(input_path)
+        payload = result.to_dict()
+        payload["ok"] = True
+        payload["filename"] = file.filename
+        return JSONResponse(payload)
+    except HTTPException:
+        raise
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("Form zone extraction failed")
+        raise HTTPException(
+            status_code=500,
+            detail=f"فشل تحليل الفورم: {exc}",
         ) from exc
     finally:
         shutil.rmtree(work_dir, ignore_errors=True)

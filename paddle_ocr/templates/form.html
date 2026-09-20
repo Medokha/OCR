@@ -1,0 +1,85 @@
+<!DOCTYPE html>
+<html lang="ar" dir="rtl">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>فورم — مناطق الإجابات</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Cairo:wght@400;600;700;800&family=IBM+Plex+Sans+Arabic:wght@400;500;600&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="/static/styles.css" />
+  <link rel="stylesheet" href="/static/id.css?v=20260920a" />
+  <link rel="stylesheet" href="/static/form.css?v=20260920c" />
+</head>
+<body>
+  <div class="atmosphere" aria-hidden="true"></div>
+
+  <main class="shell id-shell">
+    <header class="hero id-hero">
+      <p class="brand">قراءة</p>
+      <h1>فهم الفورم · مناطق الإجابات</h1>
+      <p class="lede">زي البطاقة: أولاً نعدّل الدوران/الميل لو الفورم مقلوبة، بعدين نحدّد <strong>فين الإجابات</strong> بمربعات، وبعدين نقرأ منها عشان تتأكد إنها صح.</p>
+
+      <div class="cta-row">
+        <label class="btn-primary" for="form-input">اختر صورة الفورم</label>
+        <input id="form-input" type="file" accept="image/*,.png,.jpg,.jpeg,.webp,.bmp,.tif,.tiff" hidden />
+        <button id="form-run" class="btn-secondary" type="button" disabled>حدّد مناطق الإجابات</button>
+        <a class="btn-ghost" href="/id">بطاقة الرقم القومي</a>
+        <a class="btn-ghost" href="/">OCR عام</a>
+      </div>
+      <p id="form-file-label" class="file-label">الحد الأقصى {{ max_upload_mb }} ميجابايت · مثال: استمارة KYC البنك الزراعي</p>
+    </header>
+
+    <section id="form-status" class="status" hidden>
+      <div class="spinner" aria-hidden="true"></div>
+      <p id="form-status-text">جاري فهم الفورم وتحديد مناطق الإجابات…</p>
+    </section>
+
+    <section id="form-error" class="error" hidden></section>
+
+    <section id="form-results" class="id-results" hidden>
+      <div class="id-layout">
+        <aside class="id-visuals">
+          <article class="id-photo-card">
+            <h3>الفورم مع مناطق الإجابات</h3>
+            <div class="photo-frame card-frame form-annot-frame">
+              <img id="form-annotated" alt="مناطق الإجابات" hidden />
+              <p id="form-annotated-empty" class="photo-empty">—</p>
+            </div>
+            <p class="meta">كل مربع = مكان إجابة متوقع. راجعها قبل ما تعتمد القيم.</p>
+          </article>
+          <article class="id-photo-card">
+            <h3>الأصل</h3>
+            <div class="photo-frame card-frame">
+              <img id="form-original" alt="الفورم" hidden />
+              <p id="form-original-empty" class="photo-empty">—</p>
+            </div>
+          </article>
+        </aside>
+
+        <div class="id-data">
+          <div class="id-data-head">
+            <h2>الحقول والقيم</h2>
+            <p id="form-meta" class="meta"></p>
+          </div>
+          <div id="form-title-badge" class="id-side-badge" hidden></div>
+
+          <div id="form-fields" class="id-fields-grid"></div>
+
+          <div class="id-crops-box">
+            <h3>قصّات مناطق الإجابات</h3>
+            <div id="form-crops" class="id-crops-grid"></div>
+          </div>
+
+          <details class="form-rules">
+            <summary>كيف اتحسبت المناطق؟</summary>
+            <ul id="form-rules-list"></ul>
+          </details>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <script src="/static/form.js?v=20260920c"></script>
+</body>
+</html>

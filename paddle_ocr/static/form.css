@@ -1,0 +1,49 @@
+.form-annot-frame img {
+  width: 100%;
+  height: auto;
+  max-height: none;
+}
+
+.form-rules {
+  margin-top: 1.25rem;
+  padding: 0.85rem 1rem;
+  border-radius: 12px;
+  background: rgba(255, 255, 255, 0.55);
+  border: 1px solid var(--line, rgba(20, 60, 50, 0.14));
+  font-family: var(--font-body, "IBM Plex Sans Arabic", sans-serif);
+}
+
+.form-rules summary {
+  cursor: pointer;
+  font-weight: 600;
+  color: var(--pine, #1f5c4d);
+}
+
+.form-rules ul {
+  margin: 0.75rem 0 0;
+  padding-inline-start: 1.1rem;
+  font-size: 0.85rem;
+  line-height: 1.55;
+  color: #334;
+  max-height: 280px;
+  overflow: auto;
+}
+
+.form-zone-card {
+  display: grid;
+  gap: 0.35rem;
+}
+
+.form-zone-card .zone-tag {
+  font-size: 0.72rem;
+  color: #5a6a64;
+}
+
+.form-zone-card.is-empty .field-value {
+  color: #9aa;
+  font-style: italic;
+}
+
+.form-zone-card.is-found {
+  border-color: rgba(31, 138, 114, 0.45);
+}
