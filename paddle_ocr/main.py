@@ -223,7 +223,10 @@ async def ocr_egyptian_id(
 
 
 @app.post("/api/form/zones")
-async def form_answer_zones(file: UploadFile = File(...)) -> JSONResponse:
+async def form_answer_zones(
+    file: UploadFile = File(...),
+    use_handwriting: str = Form(default="0"),
+) -> JSONResponse:
     """Locate answer zones on a structured form, annotate, then read values."""
     content = await file.read()
     if not file.filename:
@@ -243,16 +246,23 @@ async def form_answer_zones(file: UploadFile = File(...)) -> JSONResponse:
     if not content:
         raise HTTPException(status_code=400, detail="الملف فارغ.")
 
+    hw = str(use_handwriting or "0").strip().lower() in {"1", "true", "yes", "on"}
     job_id = uuid.uuid4().hex
     work_dir = Path(tempfile.mkdtemp(prefix=f"form_{job_id}_", dir=UPLOAD_DIR))
     input_path = work_dir / f"form{ext}"
     try:
         input_path.write_bytes(content)
-        logger.info("Form zones: %s (%.2f MB)", file.filename, size_mb)
-        result = form_extractor.process_image_path(input_path)
+        logger.info(
+            "Form zones: %s (%.2f MB) handwriting=%s",
+            file.filename,
+            size_mb,
+            hw,
+        )
+        result = form_extractor.process_image_path(input_path, use_handwriting=hw)
         payload = result.to_dict()
         payload["ok"] = True
         payload["filename"] = file.filename
+        payload["use_handwriting"] = hw
         return JSONResponse(payload)
     except HTTPException:
         raise

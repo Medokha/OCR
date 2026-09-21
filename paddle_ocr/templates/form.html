@@ -9,7 +9,7 @@
   <link href="https://fonts.googleapis.com/css2?family=Cairo:wght@400;600;700;800&family=IBM+Plex+Sans+Arabic:wght@400;500;600&display=swap" rel="stylesheet" />
   <link rel="stylesheet" href="/static/styles.css" />
   <link rel="stylesheet" href="/static/id.css?v=20260920a" />
-  <link rel="stylesheet" href="/static/form.css?v=20260920c" />
+  <link rel="stylesheet" href="/static/form.css?v=20260921a" />
 </head>
 <body>
   <div class="atmosphere" aria-hidden="true"></div>
@@ -27,6 +27,10 @@
         <a class="btn-ghost" href="/id">بطاقة الرقم القومي</a>
         <a class="btn-ghost" href="/">OCR عام</a>
       </div>
+      <label class="hw-toggle" for="form-handwriting">
+        <input id="form-handwriting" type="checkbox" />
+        قراءة خط اليد (Arabic-English-handwritten-OCR-v3) — أبطأ على CPU، أفضل مع GPU
+      </label>
       <p id="form-file-label" class="file-label">الحد الأقصى {{ max_upload_mb }} ميجابايت · مثال: استمارة KYC البنك الزراعي</p>
     </header>
 
@@ -80,6 +84,6 @@
     </section>
   </main>
 
-  <script src="/static/form.js?v=20260920c"></script>
+  <script src="/static/form.js?v=20260921a"></script>
 </body>
 </html>

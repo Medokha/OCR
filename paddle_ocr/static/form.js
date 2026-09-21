@@ -15,6 +15,7 @@
   const annotatedEmpty = document.getElementById("form-annotated-empty");
   const originalImg = document.getElementById("form-original");
   const originalEmpty = document.getElementById("form-original-empty");
+  const hwToggle = document.getElementById("form-handwriting");
 
   let selectedFile = null;
 
@@ -98,10 +99,14 @@
     resultsEl.hidden = true;
     setBusy(true);
     statusEl.hidden = false;
-    statusText.textContent = "جاري فهم الفورم وتحديد مناطق الإجابات…";
+    const hwOn = !!(hwToggle && hwToggle.checked);
+    statusText.textContent = hwOn
+      ? "جاري فهم الفورم + قراءة خط اليد (قد يأخذ وقتاً في أول تشغيل)…"
+      : "جاري فهم الفورم وتحديد مناطق الإجابات…";
 
     const fd = new FormData();
     fd.append("file", selectedFile);
+    fd.append("use_handwriting", hwOn ? "1" : "0");
 
     try {
       const res = await fetch("/api/form/zones", { method: "POST", body: fd });

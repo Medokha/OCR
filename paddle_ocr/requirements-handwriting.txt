@@ -1,0 +1,14 @@
+# Optional deps for Arabic-English-handwritten-OCR-v3 (Qwen2.5-VL-3B)
+# Install AFTER requirements.txt:
+#   pip install -r requirements-handwriting.txt
+# GPU (CUDA): install matching torch from https://pytorch.org first, then this file.
+#
+# Model ~7.5GB — download with: python download_handwritten_model.py
+
+torch>=2.2.0
+torchvision>=0.17.0
+transformers>=4.49.0
+accelerate>=0.33.0
+Pillow>=10.0.0
+huggingface_hub>=0.24.0
+qwen-vl-utils>=0.0.8

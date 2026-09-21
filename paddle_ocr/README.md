@@ -2,7 +2,7 @@
 
 تطبيق ويب لاستخراج النص العربي من ملفات PDF باستخدام [PaddleOCR](https://github.com/PaddlePaddle/PaddleOCR) (الإصدار 3.x / نموذج عربي PP-OCRv5).
 
-> **Full model write-up:** see [`MODELS.md`](MODELS.md) (PaddleOCR, OnnxTR, DeepLab autocrop, YuNet).
+> **Full model write-up:** see [`MODELS.md`](MODELS.md) (PaddleOCR, OnnxTR, handwritten-OCR-v3, DeepLab autocrop, YuNet).
 
 ## المتطلبات
 
@@ -20,6 +20,15 @@ python -m pip install -U pip
 pip install -r requirements.txt
 python download_models.py
 ```
+
+### خط اليد (اختياري) — Arabic-English-handwritten-OCR-v3
+
+```powershell
+pip install -r requirements-handwriting.txt
+python download_handwritten_model.py
+```
+
+ثم من صفحة `/form` فعّل خيار **قراءة خط اليد**.
 
 > على Windows CPU غالباً يكفي `paddlepaddle` من PyPI. إن فشل التثبيت راجع [دليل تثبيت PaddlePaddle](https://www.paddlepaddle.org.cn/install/quick).
 >

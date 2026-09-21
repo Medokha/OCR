@@ -11,6 +11,7 @@ It combines several specialized models: text OCR, document crop, and face crop �
 |---|---|---|
 | **Primary Arabic OCR** | PaddleOCR PP-OCRv5 (det + Arabic rec) | Detect and read Arabic/Latin text & digits |
 | **Secondary Arabic OCR** | OnnxTR (FAST det + PARSeq rec) | Ensemble / fallback for hard regions |
+| **Handwritten OCR (optional)** | Arabic-English-handwritten-OCR-v3 (Qwen2.5-VL-3B) | Read Arabic/English handwriting in form answer cells |
 | **ID card crop** | DeepLabV3 ONNX (`autocrop_model_v2`) | Find and warp the card from a phone photo |
 | **Face crop** | OpenCV YuNet | Crop the portrait on the ID front |
 | **Fallback geometry** | OpenCV (contours / deskew) | If DeepLab crop fails |
@@ -59,6 +60,29 @@ Sources (community fine-tunes for Arabic documents):
 - Optional: skip with env `OCR_SKIP_ONNXTR=1`.
 
 **Where it runs:** `arabic_onnxtr.py` → `ArabicOnnxTrEngine`
+
+---
+
+## 2b. Handwritten OCR — Arabic-English-handwritten-OCR-v3 (optional)
+
+**Stack:** [sherif1313/Arabic-English-handwritten-OCR-v3](https://huggingface.co/sherif1313/Arabic-English-handwritten-OCR-v3)  
+Fine-tuned **Qwen2.5-VL-3B** (Apache-2.0) for Arabic + English handwriting.
+
+**Local weights:** `models/Arabic-English-handwritten-OCR-v3` (~7.5GB)
+
+```powershell
+pip install -r requirements-handwriting.txt
+python download_handwritten_model.py
+```
+
+**Role**
+- Optional path for **form answer cells** filled by hand.
+- Paddle still finds printed labels / zones; this VLM re-reads each crop.
+- Enable in Form UI checkbox, or `POST /api/form/zones` with `use_handwriting=1`.
+- Lazy-loaded — only downloads/loads when handwriting mode is requested.
+- CPU works but is slow; CUDA strongly preferred.
+
+**Where it runs:** `handwritten_ocr.py` → `HandwrittenOcrEngine` (wired from `form_zones.py`)
 
 ---
 
@@ -148,6 +172,13 @@ opencv-python (via stack)   → YuNet, geometry, enhance
 fastapi + uvicorn           → web API / UI
 ```
 
+Optional handwriting (`requirements-handwriting.txt`):
+
+```text
+torch, transformers, accelerate, qwen-vl-utils
+→ Arabic-English-handwritten-OCR-v3
+```
+
 ---
 
 ## Summary for stakeholders
@@ -156,8 +187,9 @@ This system is an **open-source, on-premise Arabic OCR stack**:
 
 1. **PaddleOCR PP-OCRv5 Arabic** — main reader  
 2. **OnnxTR Arabic** — secondary reader  
-3. **DeepLabV3 autocrop** — card localization  
-4. **YuNet** — face crop  
-5. **Domain rules** — Egyptian national ID field mapping  
+3. **Arabic-English-handwritten-OCR-v3** — optional handwriting (forms)  
+4. **DeepLabV3 autocrop** — card localization  
+5. **YuNet** — face crop  
+6. **Domain rules** — Egyptian national ID field mapping  
 
 No third-party cloud vision API is required for OCR.

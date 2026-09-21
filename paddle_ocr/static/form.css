@@ -47,3 +47,22 @@
 .form-zone-card.is-found {
   border-color: rgba(31, 138, 114, 0.45);
 }
+
+.hw-toggle {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.55rem;
+  margin: 0.85rem 0 0;
+  max-width: 42rem;
+  font-family: var(--font-body, "IBM Plex Sans Arabic", sans-serif);
+  font-size: 0.88rem;
+  line-height: 1.45;
+  color: #2a4038;
+  cursor: pointer;
+}
+
+.hw-toggle input {
+  margin-top: 0.2rem;
+  accent-color: #1f8a72;
+  flex-shrink: 0;
+}

@@ -954,7 +954,12 @@ def auto_deskew_form(image_bgr: np.ndarray, max_angle: float = 12.0) -> tuple[np
 class FormZoneExtractor:
     """Locate answer zones on structured forms, annotate, then read values."""
 
-    def process_image_path(self, image_path: str | Path) -> FormZoneResult:
+    def process_image_path(
+        self,
+        image_path: str | Path,
+        *,
+        use_handwriting: bool = False,
+    ) -> FormZoneResult:
         from ocr_engine import ArabicOcrEngine
 
         original = _load_bgr(image_path)
@@ -996,6 +1001,20 @@ class FormZoneExtractor:
             ("DESKEW: تم تصحيح الميل" if deskew_flag else "DESKEW: لا يوجد ميل يذكر"),
             f"OCR_BLOCKS: {len(boxes)}",
         ]
+        hw_engine = None
+        if use_handwriting:
+            try:
+                from handwritten_ocr import HandwrittenOcrEngine
+
+                hw_engine = HandwrittenOcrEngine.get()
+                rules.append(
+                    "HANDWRITING: Arabic-English-handwritten-OCR-v3 "
+                    f"({HandwrittenOcrEngine.model_source()})"
+                )
+            except Exception as exc:  # noqa: BLE001
+                logger.exception("handwriting engine unavailable")
+                rules.append(f"HANDWRITING_FAIL: {exc}")
+                hw_engine = None
         _ = orient_ang
         _ = scale
 
@@ -1085,10 +1104,26 @@ class FormZoneExtractor:
             value = _reject_junk(value)
             if not value:
                 conf, hits = 0.0, []
-            # Re-OCR crop for empty/weak cells
+            # Re-OCR crop for empty/weak cells (Paddle) — or prefer handwriting VLM
             crop = _crop_zone(work, bbox)
             crop_b64 = _encode_b64(crop, 90) if crop is not None and crop.size else None
-            if (not value or conf < 0.55) and crop is not None and crop.size:
+            hw_ok = False
+            if hw_engine is not None and crop is not None and crop.size:
+                try:
+                    hw_label = disp or label_ar or label_en or str(fdef["key"])
+                    hw_text = hw_engine.recognize_field_bgr(crop, label=hw_label)
+                    hw_clean = _reject_junk(hw_text.strip() if hw_text else None)
+                    if hw_clean:
+                        value = hw_clean
+                        conf = max(conf, 0.72)
+                        hw_ok = True
+                        rules.append(f"ZONE_HW: {fdef['key']} ← handwritten-OCR-v3")
+                    else:
+                        rules.append(f"ZONE_HW_EMPTY: {fdef['key']}")
+                except Exception:  # noqa: BLE001
+                    logger.debug("zone handwriting OCR failed", exc_info=True)
+                    rules.append(f"ZONE_HW_ERR: {fdef['key']}")
+            if (not hw_ok) and (not value or conf < 0.55) and crop is not None and crop.size:
                 try:
                     big = crop
                     if max(crop.shape[:2]) < 80:
@@ -1138,9 +1173,10 @@ class FormZoneExtractor:
 
         found_n = sum(1 for z in zones if z.found)
         zone_n = sum(1 for z in zones if z.bbox[2] > z.bbox[0])
+        hw_note = " · خط يد (handwritten-OCR-v3)" if hw_engine is not None else ""
         message = (
-            f"[form-zones] {orient_note} · تم تحديد {zone_n} منطقة إجابة · قُرئ منها {found_n} قيمة. "
-            "راجع المربعات على الصورة للتأكد."
+            f"[form-zones] {orient_note} · تم تحديد {zone_n} منطقة إجابة · قُرئ منها {found_n} قيمة"
+            f"{hw_note}. راجع المربعات على الصورة للتأكد."
         )
 
         ocr_list = [
